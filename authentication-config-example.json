@@ -1,0 +1,14 @@
+{
+  "testEndpoint": "/store/inventory",
+  "authType": "custom",
+  "fieldKey": "api_key",
+  "fieldLabel": "API Key",
+  "fieldType": "password",
+  "helpText": "Enter any API key for testing (Petstore accepts any value for testing purposes)",
+  "helpLink": "https://petstore.swagger.io/",
+  "connectionLabel": {
+    "type": "string",
+    "value": "Petstore Account"
+  }
+}
+

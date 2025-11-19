@@ -1,0 +1,35 @@
+{
+  "actions": {
+    "addPet": {
+      "fieldDefaults": {
+        "status": "available"
+      }
+    },
+    "updatePet": {
+      "fieldDefaults": {
+        "status": "available"
+      }
+    },
+    "createUsersWithListInput": {
+      "simplify": {
+        "enabled": true,
+        "name": "Create a New User",
+        "flattenArray": {
+          "arrayField": "users",
+          "itemSchema": "User"
+        }
+      },
+      "hideRequestBodyProperties": ["password"]
+    },
+    "createUser": {
+      "hideRequestBodyProperties": ["password"]
+    },
+    "updateUser": {
+      "hideRequestBodyProperties": ["password"]
+    },
+    "loginUser": {
+      "hideRequestBodyProperties": ["password"]
+    }
+  }
+}
+

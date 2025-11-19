@@ -1,0 +1,30 @@
+{
+  "name": "zapier-generator",
+  "version": "1.0.0",
+  "description": "Generate Zapier integration from OpenAPI schema",
+  "main": "scripts/generate_zapier_from_openapi.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "generate": "node scripts/generate_zapier_from_openapi.js",
+    "generate:clean": "node scripts/generate_zapier_from_openapi.js --clean && cd generated && echo 'installing dependencies...' && npm install",
+    "zapier:login": "cd generated && npx zapier-platform login",
+    "zapier:install": "cd generated && npm install",
+    "zapier:test": "cd generated && npx zapier-platform test -- --exit",
+    "zapier:push": "cd generated && npx zapier-platform push",
+    "zapier:validate": "cd generated && npx zapier-platform validate",
+    "zapier:users:invite": "cd generated && npx zapier-platform users:invite",
+    "zapier:users:list": "cd generated && npx zapier-platform users:list",
+    "zapier:users:links": "cd generated && npx zapier-platform users:links"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "js-yaml": "^4.1.0",
+    "prettier": "^3.0.0"
+  },
+  "devDependencies": {},
+  "keywords": ["zapier", "openapi", "code-generation"],
+  "author": "",
+  "license": "MIT"
+}

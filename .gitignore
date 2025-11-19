@@ -1,0 +1,44 @@
+# Generated Zapier integration files
+generated/
+
+# Schema cache
+schema-cache/
+
+# Environment variables
+.env
+
+# Node modules
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Zapier files (in generated directory)
+generated/.zapierapprc
+
+# Configuration files (use example files as templates)
+# Ignore all *-config*.json files except those ending in -example.json
+*-config*.json
+!*-config-example.json
+
+# Work in progress files
+Debugging.md
+
+# Root-level .zapierapprc (generator creates it in generated/ directory)
+.zapierapprc
+
+# Inspection/backup directories
+v1-inspection/
+

@@ -1,0 +1,19 @@
+{
+  "name": "zapier-platform-example-app",
+  "version": "{{version}}",
+  "description": "Zapier integration generated from OpenAPI schema",
+  "repository": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "NODE_PATH=$(pwd)/node_modules mocha --recursive --timeout 10000"
+  },
+  "dependencies": {
+    "zapier-platform-core": "{{zapierCoreVersion}}"
+  },
+  "devDependencies": {
+    "zapier-platform-cli": "{{zapierCliVersion}}",
+    "mocha": "^10.0.0",
+    "should": "^13.2.0"
+  }
+}
+
