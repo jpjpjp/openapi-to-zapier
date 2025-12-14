@@ -2,7 +2,9 @@
 // Generated from OpenAPI operation: {{operationId}}
 // Endpoint: {{method}} {{path}}
 
-const perform = async (z, bundle) => {
+{{#if dynamicFieldsCode}}{{dynamicFieldsCode}}
+
+{{/if}}const perform = async (z, bundle) => {
   const baseUrl = '{{baseUrl}}';
   let url = `${baseUrl}{{path}}`;
   

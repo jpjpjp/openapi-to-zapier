@@ -21,6 +21,218 @@ const ACTION_CONFIG_PATH = path.join(process.cwd(), 'actions-config.json');
 const AUTH_CONFIG_PATH = path.join(process.cwd(), 'authentication-config.json');
 
 // Load trigger configuration file
+function parseJsonWithComments(configContent) {
+  let result = '';
+  let inString = false;
+  let stringChar = null;
+  let escaped = false;
+  let i = 0;
+
+  while (i < configContent.length) {
+    const ch = configContent[i];
+    const next = configContent[i + 1];
+
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      i += 1;
+      continue;
+    }
+
+    if (ch === '\\' && inString) {
+      escaped = true;
+      result += ch;
+      i += 1;
+      continue;
+    }
+
+    if (!inString && ch === '/' && next === '*') {
+      // Skip block comment
+      i += 2;
+      while (i < configContent.length && !(configContent[i] === '*' && configContent[i + 1] === '/')) {
+        i += 1;
+      }
+      i += 2; // skip closing */
+      continue;
+    }
+
+    if (!inString && ch === '/' && next === '/') {
+      // Skip line comment
+      i += 2;
+      while (i < configContent.length && configContent[i] !== '\n') {
+        i += 1;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      if (!inString) {
+        inString = true;
+        stringChar = ch;
+      } else if (stringChar === ch) {
+        inString = false;
+        stringChar = null;
+      }
+      result += ch;
+      i += 1;
+      continue;
+    }
+
+    result += ch;
+    i += 1;
+  }
+
+  return JSON.parse(result);
+}
+
+// ============================================================================
+// Helper Functions for Code Generation
+// ============================================================================
+
+/**
+ * Escape a string for use in a JavaScript string literal (single quotes)
+ */
+function escapeForJsString(str) {
+  if (!str) return '';
+  return str
+    .replace(/\\/g, '\\\\')  // Escape backslashes first
+    .replace(/'/g, "\\'")     // Escape single quotes
+    .replace(/\n/g, '\\n')    // Escape newlines
+    .replace(/\r/g, '\\r');   // Escape carriage returns
+}
+
+/**
+ * Escape a string for use in a JavaScript template literal (backticks)
+ * Escapes backticks and backslashes, but NOT $ signs (so ${var} remains)
+ */
+function escapeForTemplate(str) {
+  return str
+    .replace(/\\/g, '\\\\')  // Escape backslashes first
+    .replace(/`/g, '\\`');   // Escape backticks
+}
+
+/**
+ * Escape a string for use in a Function constructor string
+ * Escapes backticks, backslashes, single quotes, and $ signs
+ */
+function escapeForFunctionString(str) {
+  return str
+    .replace(/\\/g, '\\\\')  // Escape backslashes first
+    .replace(/`/g, '\\`')    // Escape backticks
+    .replace(/'/g, "\\'")     // Escape single quotes
+    .replace(/\$/g, '\\$');  // Escape $ to prevent evaluation in our string
+}
+
+/**
+ * Replace template variables (${varExpr}) with their mapped variable names (${varName})
+ * Used for simple templates where variables are extracted to const declarations
+ */
+function replaceTemplateVars(template, varMap) {
+  let processed = template;
+  varMap.forEach((varName, varExpr) => {
+    // Match ${varExpr} in the template
+    // Escape special regex characters in varExpr (like . in transaction_criteria.payee)
+    const escapedVarExpr = varExpr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Build regex to match ${varExpr} - need to escape $ and { in the pattern
+    const regex = new RegExp('\\$\\{' + escapedVarExpr + '\\}', 'g');
+    // Replace with ${varName} - use string concatenation to create literal string
+    const replacement = '$' + '{' + varName + '}';
+    processed = processed.replace(regex, replacement);
+  });
+  return processed;
+}
+
+/**
+ * Replace template variables with item.property access for nested templates
+ * Used when template has nested template literals and needs Function constructor
+ */
+function replaceTemplateVarsForNested(template) {
+  return template.replace(/\$\{([a-zA-Z_][a-zA-Z0-9_.]*)\}/g, (match, varName) => {
+    if (varName.startsWith('item.')) {
+      return match;
+    }
+    return '${item.' + varName + '}';
+  });
+}
+
+/**
+ * Generate label code for "simple template + complex fallback" case
+ * This is used when the main template is simple but the fallback has nested templates
+ */
+function generateSimpleTemplateComplexFallbackCode(varCode, escapedTemplate, escapedFallback) {
+  return '\n  // Add name field for dynamic dropdown display (Zapier uses \'name\' field for labels)\n' +
+    '  results = results.map((item) => {\n' +
+    varCode +
+    '    // Use simple template literal for main template\n' +
+    '    let name = `' + escapedTemplate + '`.trim();\n' +
+    '    \n' +
+    '    // Use Function constructor for complex fallback if main template is empty\n' +
+    '    if (!name || name.trim() === \'\') {\n' +
+    '      try {\n' +
+    '        const fallbackFunc = new Function(\'item\', \'return \\`' + escapedFallback + '\\`;\');\n' +
+    '        name = fallbackFunc(item);\n' +
+    '      } catch (e) {\n' +
+    '        name = \'Item \' + (item.id || \'\');\n' +
+    '      }\n' +
+    '    }\n' +
+    '    \n' +
+    '    return {\n' +
+    '      ...item,\n' +
+    '      name: name || item.description || (\'Item \' + (item.id || \'\')),\n' +
+    '    };\n' +
+    '  });';
+}
+
+/**
+ * Generate label code for "complex template + complex fallback" case
+ * Both template and fallback use Function constructor
+ */
+function generateComplexTemplateComplexFallbackCode(varCode, escapedTemplate, escapedFallback) {
+  return '\n  // Add name field for dynamic dropdown display (Zapier uses \'name\' field for labels)\n' +
+    '  results = results.map((item) => {\n' +
+    varCode +
+    '    // Evaluate complex template with nested literals\n' +
+    '    let name = \'\';\n' +
+    '    try {\n' +
+    '      const templateFunc = new Function(\'item\', \'return \\`' + escapedTemplate + '\\`;\');\n' +
+    '      name = templateFunc(item);\n' +
+    '      if (!name || name.trim() === \'\') {\n' +
+    '        const fallbackFunc = new Function(\'item\', \'return \\`' + escapedFallback + '\\`;\');\n' +
+    '        name = fallbackFunc(item);\n' +
+    '      }\n' +
+    '    } catch (e) {\n' +
+    '      try {\n' +
+    '        const fallbackFunc = new Function(\'item\', \'return \\`' + escapedFallback + '\\`;\');\n' +
+    '        name = fallbackFunc(item);\n' +
+    '      } catch (e2) {\n' +
+    '        name = \'Item \' + (item.id || \'\');\n' +
+    '      }\n' +
+    '    }\n' +
+    '    \n' +
+    '    return {\n' +
+    '      ...item,\n' +
+    '      name: name || item.description || (\'Item \' + (item.id || \'\')),\n' +
+    '    };\n' +
+    '  });';
+}
+
+/**
+ * Generate label code for "simple template + simple fallback" case
+ * Both use simple template literals
+ */
+function generateSimpleTemplateSimpleFallbackCode(varCode, escapedTemplate, escapedFallback) {
+  return '\n  // Add name field for dynamic dropdown display (Zapier uses \'name\' field for labels)\n' +
+    '  results = results.map((item) => {\n' +
+    varCode +
+    '    const name = `' + escapedTemplate + '`.trim();\n' +
+    '    \n' +
+    '    return {\n' +
+    '      ...item,\n' +
+    '      name: name || `' + escapedFallback + '` || item.description || `Item ${item.id}`,\n' +
+    '    };\n' +
+    '  });';
+}
+
 function loadTriggerConfig() {
   const configPath = TRIGGER_CONFIG_PATH;
   if (!fs.existsSync(configPath)) {
@@ -29,7 +241,19 @@ function loadTriggerConfig() {
   
   try {
     const configContent = fs.readFileSync(configPath, 'utf8');
-    return JSON.parse(configContent);
+    const config = parseJsonWithComments(configContent);
+    const triggers = config.triggers || {};
+    
+    // Validate that all triggers have the required 'endpoint' property
+    for (const [triggerKey, triggerConfig] of Object.entries(triggers)) {
+      if (!triggerConfig.endpoint) {
+        console.error(`❌ Error: Trigger "${triggerKey}" is missing required "endpoint" property.`);
+        console.error(`   Each trigger must specify an "endpoint" property with the API path (e.g., "/categories").`);
+        process.exit(1);
+      }
+    }
+    
+    return { triggers };
   } catch (error) {
     console.warn(`⚠️  Warning: Could not parse trigger config file at ${configPath}: ${error.message}`);
     return { triggers: {} };
@@ -45,7 +269,7 @@ function loadActionConfig() {
   
   try {
     const configContent = fs.readFileSync(configPath, 'utf8');
-    return JSON.parse(configContent);
+    return parseJsonWithComments(configContent);
   } catch (error) {
     console.warn(`⚠️  Warning: Could not parse action config file at ${configPath}: ${error.message}`);
     return { actions: {} };
@@ -74,7 +298,7 @@ function loadAuthConfig() {
   
   try {
     const configContent = fs.readFileSync(configPath, 'utf8');
-    return JSON.parse(configContent);
+    return parseJsonWithComments(configContent);
   } catch (error) {
     console.warn(`⚠️  Warning: Could not parse authentication config file at ${configPath}: ${error.message}`);
     // Return defaults on error
@@ -103,6 +327,7 @@ function parseArgs() {
     clean: false,
     outputDir: DEFAULT_OUTPUT_DIR,
     endpoint: null, // For Phase 1: single endpoint mode
+    version: null, // Override version from OpenAPI spec
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -117,6 +342,8 @@ function parseArgs() {
       config.outputDir = args[++i];
     } else if (arg === '--endpoint' && args[i + 1]) {
       config.endpoint = args[++i];
+    } else if (arg === '--version' && args[i + 1]) {
+      config.version = args[++i];
     }
   }
 
@@ -227,7 +454,7 @@ function titleCase(str) {
 }
 
 // Generate action file for an endpoint
-function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {}) {
+function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {}, triggerConfig = {}) {
   const key = endpoint.operationId || endpoint.path.replace(/\//g, '_').replace(/^_/, '');
   let noun = mapper.getNoun(endpoint.operationId, endpoint.path);
   
@@ -255,6 +482,13 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {})
   // Get fields to hide from config
   const hideQueryParams = new Set(actionConfig.hideQueryParams || []);
   const hideRequestBodyProperties = new Set(actionConfig.hideRequestBodyProperties || []);
+  
+  // Get dynamic fields config early (needed for request body code generation)
+  const dynamicFieldsConfig = actionConfig.dynamicFields || {};
+  const dynamicFieldKeys = new Set(Object.keys(dynamicFieldsConfig));
+  
+  // Get helper fields config (UI-only fields that map to API properties)
+  const helperFieldsConfig = actionConfig.helperFields || {};
   
   // Filter query params based on hideQueryParams
   const visibleQueryParams = queryParams.filter(p => !hideQueryParams.has(p.name));
@@ -288,16 +522,26 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {})
         
         // If publicName is specified, create a parent object field with children
         if (publicName) {
-          // Create a parent object field with the item fields as children
+          // Filter out hidden properties from item fields (for nested objects)
+          const filteredItemFields = itemFields.filter(field => !hideRequestBodyProperties.has(field.key));
+          
+          // Create a parent object field with the filtered item fields as children
           const parentKey = publicName.toLowerCase().replace(/\s+/g, '_'); // Convert "New Transaction" to "new_transaction"
           const parentField = {
             key: parentKey,
             label: publicName,
             type: 'object',
-            children: itemFields,
+            children: filteredItemFields,
             required: true
           };
           bodyFields.push(parentField);
+          
+          // Store reference to parent field for later use (for adding helper fields as children)
+          // We'll add this to a variable that can be accessed when processing helper fields
+          if (!inputFields._parentFieldRefs) {
+            inputFields._parentFieldRefs = {};
+          }
+          inputFields._parentFieldRefs[parentKey] = parentField;
         } else {
           // No publicName: add item fields directly (backward compatibility)
           bodyFields = itemFields;
@@ -345,13 +589,122 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {})
     }
     
     // Filter out hidden body properties
-    bodyFields = bodyFields.filter(field => !hideRequestBodyProperties.has(field.key));
+    // For nested parent fields, also filter their children
+    bodyFields = bodyFields.map(field => {
+      if (field.children && Array.isArray(field.children)) {
+        // Filter children of nested objects
+        return {
+          ...field,
+          children: field.children.filter(child => !hideRequestBodyProperties.has(child.key))
+        };
+      }
+      return field;
+    }).filter(field => !hideRequestBodyProperties.has(field.key));
     
     // Filter out body fields that have the same key as path/query params
     const uniqueBodyFields = bodyFields.filter(field => !existingFieldKeys.has(field.key));
     inputFields.push(...uniqueBodyFields);
     // Update the set for any future checks
     uniqueBodyFields.forEach(field => existingFieldKeys.add(field.key));
+    
+    // Clean up the temporary reference storage
+    if (inputFields._parentFieldRefs) {
+      delete inputFields._parentFieldRefs;
+    }
+  }
+  
+  // Add helper fields (UI-only fields that map to API properties)
+  if (Object.keys(helperFieldsConfig).length > 0) {
+    // For simplified actions with nested objects, check if helper fields map to nested properties
+    let parentFieldForNested = null;
+    if (isSimplified && simplify.flattenArray && simplify.flattenArray.publicName) {
+      const parentKey = simplify.flattenArray.publicName.toLowerCase().replace(/\s+/g, '_');
+      
+      // Try to find parent field from the stored reference first, then from inputFields
+      if (inputFields._parentFieldRefs && inputFields._parentFieldRefs[parentKey]) {
+        parentFieldForNested = inputFields._parentFieldRefs[parentKey];
+      } else {
+        parentFieldForNested = inputFields.find(field => field.key === parentKey && field.children);
+      }
+      
+      // Check which helper fields map to properties in the nested item schema
+      if (parentFieldForNested) {
+        const schemas = mapper.schemas || {};
+        const itemSchema = schemas[simplify.flattenArray.itemSchema];
+        const itemSchemaProperties = itemSchema && itemSchema.properties ? Object.keys(itemSchema.properties) : [];
+        
+        Object.entries(helperFieldsConfig).forEach(([helperKey, helperConfig]) => {
+          // If helper field maps to a property in the nested item schema, add it as a child
+          if (helperConfig.mapTo && itemSchemaProperties.includes(helperConfig.mapTo)) {
+            const helperField = {
+              key: helperKey,
+              label: helperConfig.label || helperKey,
+              type: helperConfig.type || 'string',
+              helpText: helperConfig.helpText || '',
+              required: false,
+            };
+            
+            // Add dynamic dropdown support if configured
+            if (helperConfig.dynamicFields && helperConfig.dynamicFields.sourceTrigger) {
+              const sourceTrigger = helperConfig.dynamicFields.sourceTrigger;
+              const valueField = helperConfig.dynamicFields.valueField || 'id';
+              
+              const triggerConfigs = triggerConfig.triggers || {};
+              const triggerExists = triggerConfigs[sourceTrigger] !== undefined;
+              
+              if (triggerExists) {
+                helperField.dynamic = true;
+                helperField.dynamicKey = `${sourceTrigger}.${valueField}`;
+              } else {
+                console.warn(`  ⚠️  Warning: Source trigger "${sourceTrigger}" for helper field "${helperKey}" not found in trigger config. Skipping dynamic field.`);
+              }
+            }
+            
+            // Add as child of parent field
+            parentFieldForNested.children.push(helperField);
+            existingFieldKeys.add(helperKey);
+            return; // Skip adding as top-level field
+          }
+        });
+      }
+    }
+    
+    // Add remaining helper fields as top-level fields (those that don't map to nested properties)
+    Object.entries(helperFieldsConfig).forEach(([helperKey, helperConfig]) => {
+      // Skip if already added as nested child
+      if (existingFieldKeys.has(helperKey)) {
+        return;
+      }
+      
+      // Create field object for helper field
+      const helperField = {
+        key: helperKey,
+        label: helperConfig.label || helperKey,
+        type: helperConfig.type || 'string',
+        helpText: helperConfig.helpText || '',
+        required: false, // Helper fields are always optional
+      };
+      
+      // Add dynamic dropdown support if configured
+      if (helperConfig.dynamicFields && helperConfig.dynamicFields.sourceTrigger) {
+        const sourceTrigger = helperConfig.dynamicFields.sourceTrigger;
+        const valueField = helperConfig.dynamicFields.valueField || 'id';
+        
+        // Look up trigger config to verify it exists
+        const triggerConfigs = triggerConfig.triggers || {};
+        const triggerExists = triggerConfigs[sourceTrigger] !== undefined;
+        
+        if (triggerExists) {
+          helperField.dynamic = true;
+          helperField.dynamicKey = `${sourceTrigger}.${valueField}`;
+        } else {
+          console.warn(`  ⚠️  Warning: Source trigger "${sourceTrigger}" for helper field "${helperKey}" not found in trigger config. Skipping dynamic field.`);
+        }
+      }
+      
+      inputFields.push(helperField);
+      existingFieldKeys.add(helperKey);
+    });
   }
   
   // Apply field defaults from config
@@ -523,25 +876,207 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {})
         requestBodyCode = '  const requestBody = {};\n';
         requestBodyCode += `  const ${arrayFieldName}Item = {};\n`;
         
+        if (parentKey) {
+          requestBodyCode += `  const get${arrayFieldName}Field = (key) => {\n`;
+          requestBodyCode += `    const parent = bundle.inputData.${parentKey};\n`;
+          requestBodyCode += `    if (parent && Object.prototype.hasOwnProperty.call(parent, key)) {\n`;
+          requestBodyCode += `      return parent[key];\n`;
+          requestBodyCode += `    }\n`;
+          requestBodyCode += `    const flattenedKey = \`${parentKey}__\${key}\`;\n`;
+          requestBodyCode += `    if (Object.prototype.hasOwnProperty.call(bundle.inputData, flattenedKey)) {\n`;
+          requestBodyCode += `      return bundle.inputData[flattenedKey];\n`;
+          requestBodyCode += `    }\n`;
+          requestBodyCode += `    if (Object.prototype.hasOwnProperty.call(bundle.inputData, key)) {\n`;
+          requestBodyCode += `      return bundle.inputData[key];\n`;
+          requestBodyCode += `    }\n`;
+          requestBodyCode += `    return undefined;\n`;
+          requestBodyCode += `  };\n`;
+        }
+        
         itemFields.forEach(fieldKey => {
           // Check if this is a date field that needs format conversion
           const itemFieldSchema = itemSchema.properties[fieldKey];
           const isDateField = itemFieldSchema && itemFieldSchema.type === 'string' && itemFieldSchema.format === 'date';
+          const isNumberField = itemFieldSchema && (itemFieldSchema.type === 'number' || itemFieldSchema.type === 'integer');
+          const isBooleanField = itemFieldSchema && itemFieldSchema.type === 'boolean';
           
           if (isDateField) {
             // For date fields, extract just the date part (YYYY-MM-DD) if a datetime was provided
             // This handles cases where Zapier or the user provides a datetime string
-            requestBodyCode += `  if (${inputDataPrefix}.${fieldKey} !== undefined && ${inputDataPrefix}.${fieldKey} !== '') {\n`;
+            const accessor = parentKey ? `get${arrayFieldName}Field('${fieldKey}')` : `${inputDataPrefix}.${fieldKey}`;
+            const valueVar = `${fieldKey}Value`;
+            requestBodyCode += `  const ${valueVar} = ${accessor};\n`;
+            requestBodyCode += `  if (${valueVar} !== undefined && ${valueVar} !== '') {\n`;
             requestBodyCode += `    // Extract date part (YYYY-MM-DD) from input, handling both date strings and datetime strings\n`;
-            requestBodyCode += `    const ${fieldKey}Value = String(${inputDataPrefix}.${fieldKey});\n`;
-            requestBodyCode += `    ${arrayFieldName}Item.${fieldKey} = ${fieldKey}Value.includes('T') ? ${fieldKey}Value.split('T')[0] : ${fieldKey}Value.split(' ')[0];\n`;
+            requestBodyCode += `    const ${valueVar}Str = String(${valueVar});\n`;
+            requestBodyCode += `    ${arrayFieldName}Item.${fieldKey} = ${valueVar}Str.includes('T') ? ${valueVar}Str.split('T')[0] : ${valueVar}Str.split(' ')[0];\n`;
+            requestBodyCode += `  }\n`;
+          } else if (isNumberField) {
+            const accessor = parentKey ? `get${arrayFieldName}Field('${fieldKey}')` : `${inputDataPrefix}.${fieldKey}`;
+            const valueVar = `${fieldKey}Value`;
+            requestBodyCode += `  const ${valueVar} = ${accessor};\n`;
+            // Check if this is a dynamic field (ID field) that needs cleared value handling
+            const isDynamicField = dynamicFieldKeys.has(fieldKey);
+            if (isDynamicField) {
+              // Only include if value is provided and not 0/null/empty (cleared dropdowns may send 0)
+              requestBodyCode += `  // Only include ${fieldKey} if value is provided and not 0/null/empty (cleared dropdowns may send 0)\n`;
+              requestBodyCode += `  if (${valueVar} !== undefined && ${valueVar} !== '' && ${valueVar} !== null && ${valueVar} !== 0) {\n`;
+              requestBodyCode += `    const parsed = Number(${valueVar});\n`;
+              requestBodyCode += `    if (!Number.isNaN(parsed) && parsed !== 0) {\n`;
+              requestBodyCode += `      ${arrayFieldName}Item.${fieldKey} = parsed;\n`;
+              requestBodyCode += `    }\n`;
+              requestBodyCode += `  }\n`;
+            } else {
+              // Regular number field
+              requestBodyCode += `  if (${valueVar} !== undefined && ${valueVar} !== '') {\n`;
+              requestBodyCode += `    const parsed = Number(${valueVar});\n`;
+              requestBodyCode += `    ${arrayFieldName}Item.${fieldKey} = Number.isNaN(parsed) ? ${valueVar} : parsed;\n`;
+              requestBodyCode += `  }\n`;
+            }
+          } else if (isBooleanField) {
+            const accessor = parentKey ? `get${arrayFieldName}Field('${fieldKey}')` : `${inputDataPrefix}.${fieldKey}`;
+            const valueVar = `${fieldKey}Value`;
+            requestBodyCode += `  const ${valueVar} = ${accessor};\n`;
+            requestBodyCode += `  if (${valueVar} !== undefined && ${valueVar} !== '') {\n`;
+            requestBodyCode += `    if (typeof ${valueVar} === 'boolean') {\n`;
+            requestBodyCode += `      ${arrayFieldName}Item.${fieldKey} = ${valueVar};\n`;
+            requestBodyCode += `    } else if (typeof ${valueVar} === 'string') {\n`;
+            requestBodyCode += `      ${arrayFieldName}Item.${fieldKey} = ${valueVar}.toLowerCase() === 'true';\n`;
+            requestBodyCode += `    } else {\n`;
+            requestBodyCode += `      ${arrayFieldName}Item.${fieldKey} = Boolean(${valueVar});\n`;
+            requestBodyCode += `    }\n`;
             requestBodyCode += `  }\n`;
           } else {
-            requestBodyCode += `  if (${inputDataPrefix}.${fieldKey} !== undefined && ${inputDataPrefix}.${fieldKey} !== '') {\n`;
-            requestBodyCode += `    ${arrayFieldName}Item.${fieldKey} = ${inputDataPrefix}.${fieldKey};\n`;
-            requestBodyCode += `  }\n`;
+            const accessor = parentKey ? `get${arrayFieldName}Field('${fieldKey}')` : `${inputDataPrefix}.${fieldKey}`;
+            const valueVar = `${fieldKey}Value`;
+            requestBodyCode += `  const ${valueVar} = ${accessor};\n`;
+            
+            // Check if this is an array field that should be parsed from comma-separated string (e.g., tag_ids)
+            const isArrayField = itemFieldSchema && (itemFieldSchema.type === 'array' || (itemFieldSchema.$ref && mapper.resolveRef(itemFieldSchema.$ref)?.type === 'array'));
+            
+            if (isArrayField) {
+              // Array field - parse comma-separated string into array of numbers
+              requestBodyCode += `  // Parse comma-separated string into array of numbers for ${fieldKey}\n`;
+              requestBodyCode += `  if (${valueVar} !== undefined && ${valueVar} !== '') {\n`;
+              requestBodyCode += `    // Parse comma-separated string into array of numbers\n`;
+              requestBodyCode += `    if (typeof ${valueVar} === 'string') {\n`;
+              requestBodyCode += `      const ${fieldKey}Array = ${valueVar}\n`;
+              requestBodyCode += `        .split(',')\n`;
+              requestBodyCode += `        .map((id) => parseInt(id.trim(), 10))\n`;
+              requestBodyCode += `        .filter((id) => !isNaN(id));\n`;
+              requestBodyCode += `      ${arrayFieldName}Item.${fieldKey} = ${fieldKey}Array;\n`;
+              requestBodyCode += `    } else if (Array.isArray(${valueVar})) {\n`;
+              requestBodyCode += `      // Already an array, use as-is (for backwards compatibility)\n`;
+              requestBodyCode += `      ${arrayFieldName}Item.${fieldKey} = ${valueVar};\n`;
+              requestBodyCode += `    }\n`;
+              requestBodyCode += `  }\n`;
+            } else {
+              // Regular string field
+              requestBodyCode += `  if (${valueVar} !== undefined && ${valueVar} !== '') {\n`;
+              requestBodyCode += `    ${arrayFieldName}Item.${fieldKey} = ${valueVar};\n`;
+              requestBodyCode += `  }\n`;
+            }
           }
         });
+        
+        // Handle helper fields that map to properties in the nested item
+        if (Object.keys(helperFieldsConfig).length > 0) {
+          // Group helper fields by their mapTo property
+          const helperFieldsByTarget = {};
+          Object.entries(helperFieldsConfig).forEach(([helperKey, helperConfig]) => {
+            if (helperConfig.mapTo) {
+              // Check if this helper field maps to a nested property
+              const itemSchemaProperties = itemSchema && itemSchema.properties ? Object.keys(itemSchema.properties) : [];
+              const mapsToNested = itemSchemaProperties.includes(helperConfig.mapTo);
+              
+              if (!helperFieldsByTarget[helperConfig.mapTo]) {
+                helperFieldsByTarget[helperConfig.mapTo] = {
+                  helperKeys: [],
+                  isNested: mapsToNested
+                };
+              }
+              helperFieldsByTarget[helperConfig.mapTo].helperKeys.push(helperKey);
+            }
+          });
+          
+          // Generate merging code for each target property in the nested item
+          Object.entries(helperFieldsByTarget).forEach(([targetProperty, config]) => {
+            const helperKeys = config.helperKeys;
+            const isNestedHelper = config.isNested;
+            
+            // Check if target property is an array field in the item schema
+            let isArrayField = false;
+            if (itemSchema && itemSchema.properties && itemSchema.properties[targetProperty]) {
+              const targetSchema = itemSchema.properties[targetProperty];
+              if (targetSchema.type === 'array') {
+                isArrayField = true;
+              } else if (targetSchema.$ref) {
+                const resolved = mapper.resolveRef(targetSchema.$ref);
+                if (resolved && resolved.type === 'array') {
+                  isArrayField = true;
+                }
+              }
+            }
+            
+            if (isArrayField) {
+              // Generate code to merge helper fields into array property in nested item
+              requestBodyCode += `  // Merge helper fields into ${arrayFieldName}Item.${targetProperty}\n`;
+              requestBodyCode += `  const ${targetProperty}HelperIds = [];\n`;
+              helperKeys.forEach(helperKey => {
+                // Use the getField helper function if helper fields are nested, otherwise direct access
+                const accessor = isNestedHelper && parentKey 
+                  ? `get${arrayFieldName}Field('${helperKey}')` 
+                  : `bundle.inputData.${helperKey}`;
+                requestBodyCode += `  const ${helperKey}Value = ${accessor};\n`;
+                requestBodyCode += `  if (${helperKey}Value !== undefined && ${helperKey}Value !== '' && ${helperKey}Value !== null && ${helperKey}Value !== 0) {\n`;
+                requestBodyCode += `    const parsed = Number(${helperKey}Value);\n`;
+                requestBodyCode += `    if (!Number.isNaN(parsed) && parsed !== 0) {\n`;
+                requestBodyCode += `      ${targetProperty}HelperIds.push(parsed);\n`;
+                requestBodyCode += `    }\n`;
+                requestBodyCode += `  }\n`;
+              });
+              
+              // Merge with existing property value (if any) from nested object
+              requestBodyCode += `  let ${targetProperty}Existing = [];\n`;
+              requestBodyCode += `  if (${arrayFieldName}Item.${targetProperty} && Array.isArray(${arrayFieldName}Item.${targetProperty})) {\n`;
+              requestBodyCode += `    ${targetProperty}Existing = ${arrayFieldName}Item.${targetProperty};\n`;
+              requestBodyCode += `  } else {\n`;
+              const accessor = parentKey ? `get${arrayFieldName}Field('${targetProperty}')` : `${inputDataPrefix}.${targetProperty}`;
+              requestBodyCode += `    const ${targetProperty}Value = ${accessor};\n`;
+              requestBodyCode += `    if (${targetProperty}Value !== undefined && ${targetProperty}Value !== '') {\n`;
+              requestBodyCode += `      if (typeof ${targetProperty}Value === 'string') {\n`;
+              requestBodyCode += `        ${targetProperty}Existing = ${targetProperty}Value\n`;
+              requestBodyCode += `          .split(',')\n`;
+              requestBodyCode += `          .map((id) => parseInt(id.trim(), 10))\n`;
+              requestBodyCode += `          .filter((id) => !isNaN(id));\n`;
+              requestBodyCode += `      } else if (Array.isArray(${targetProperty}Value)) {\n`;
+              requestBodyCode += `        ${targetProperty}Existing = ${targetProperty}Value;\n`;
+              requestBodyCode += `      }\n`;
+              requestBodyCode += `    }\n`;
+              requestBodyCode += `  }\n`;
+              
+              // Merge and deduplicate
+              requestBodyCode += `  const ${targetProperty}Merged = [...new Set([...${targetProperty}Existing, ...${targetProperty}HelperIds])].filter(id => id > 0);\n`;
+              requestBodyCode += `  if (${targetProperty}Merged.length > 0) {\n`;
+              requestBodyCode += `    ${arrayFieldName}Item.${targetProperty} = ${targetProperty}Merged;\n`;
+              requestBodyCode += `  }\n`;
+            } else {
+              // For non-array fields, just use the first helper field value
+              requestBodyCode += `  // Merge helper fields into ${arrayFieldName}Item.${targetProperty}\n`;
+              // Use the getField helper function if helper fields are nested, otherwise direct access
+              const accessor = isNestedHelper && parentKey 
+                ? `get${arrayFieldName}Field('${helperKeys[0]}')` 
+                : `bundle.inputData.${helperKeys[0]}`;
+              requestBodyCode += `  const ${helperKeys[0]}Value = ${accessor};\n`;
+              requestBodyCode += `  if (${helperKeys[0]}Value !== undefined && ${helperKeys[0]}Value !== '' && ${helperKeys[0]}Value !== null && ${helperKeys[0]}Value !== 0) {\n`;
+              requestBodyCode += `    const parsed = Number(${helperKeys[0]}Value);\n`;
+              requestBodyCode += `    if (!Number.isNaN(parsed) && parsed !== 0) {\n`;
+              requestBodyCode += `      ${arrayFieldName}Item.${targetProperty} = parsed;\n`;
+              requestBodyCode += `    }\n`;
+              requestBodyCode += `  }\n`;
+            }
+          });
+        }
         
         requestBodyCode += `  requestBody.${arrayFieldName} = [${arrayFieldName}Item];\n`;
         
@@ -591,6 +1126,9 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {})
           endpoint.requestBody.schema.properties && 
           endpoint.requestBody.schema.properties[field.key] &&
           endpoint.requestBody.schema.properties[field.key].format === 'date';
+        const fieldSchema = endpoint.requestBody && endpoint.requestBody.schema && endpoint.requestBody.schema.properties ? endpoint.requestBody.schema.properties[field.key] : null;
+        const isNumberField = fieldSchema && (fieldSchema.type === 'number' || fieldSchema.type === 'integer');
+        const isBooleanField = fieldSchema && fieldSchema.type === 'boolean';
         
         if (isDateField) {
           // For date fields, extract just the date part (YYYY-MM-DD) if a datetime was provided
@@ -599,12 +1137,142 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {})
           requestBodyCode += `    const ${field.key}Value = String(bundle.inputData.${field.key});\n`;
           requestBodyCode += `    requestBody.${field.key} = ${field.key}Value.includes('T') ? ${field.key}Value.split('T')[0] : ${field.key}Value.split(' ')[0];\n`;
           requestBodyCode += `  }\n`;
-        } else {
+        } else if (isNumberField) {
+          // Check if this is a dynamic field (ID field) that needs cleared value handling
+          const isDynamicField = dynamicFieldKeys.has(field.key);
+          if (isDynamicField) {
+            // Only include if value is provided and not 0/null/empty (cleared dropdowns may send 0)
+            requestBodyCode += `  // Only include ${field.key} if value is provided and not 0/null/empty (cleared dropdowns may send 0)\n`;
+            requestBodyCode += `  if (bundle.inputData.${field.key} !== undefined && bundle.inputData.${field.key} !== '' && bundle.inputData.${field.key} !== null && bundle.inputData.${field.key} !== 0) {\n`;
+            requestBodyCode += `    const parsed = Number(bundle.inputData.${field.key});\n`;
+            requestBodyCode += `    if (!Number.isNaN(parsed) && parsed !== 0) {\n`;
+            requestBodyCode += `      requestBody.${field.key} = parsed;\n`;
+            requestBodyCode += `    }\n`;
+            requestBodyCode += `  }\n`;
+          } else {
+            // Regular number field
+            requestBodyCode += `  if (bundle.inputData.${field.key} !== undefined && bundle.inputData.${field.key} !== '') {\n`;
+            requestBodyCode += `    const parsed = Number(bundle.inputData.${field.key});\n`;
+            requestBodyCode += `    requestBody.${field.key} = Number.isNaN(parsed) ? bundle.inputData.${field.key} : parsed;\n`;
+            requestBodyCode += `  }\n`;
+          }
+        } else if (isBooleanField) {
           requestBodyCode += `  if (bundle.inputData.${field.key} !== undefined && bundle.inputData.${field.key} !== '') {\n`;
-          requestBodyCode += `    requestBody.${field.key} = bundle.inputData.${field.key};\n`;
+          requestBodyCode += `    if (typeof bundle.inputData.${field.key} === 'boolean') {\n`;
+          requestBodyCode += `      requestBody.${field.key} = bundle.inputData.${field.key};\n`;
+          requestBodyCode += `    } else if (typeof bundle.inputData.${field.key} === 'string') {\n`;
+          requestBodyCode += `      requestBody.${field.key} = bundle.inputData.${field.key}.toLowerCase() === 'true';\n`;
+          requestBodyCode += `    } else {\n`;
+          requestBodyCode += `      requestBody.${field.key} = Boolean(bundle.inputData.${field.key});\n`;
+          requestBodyCode += `    }\n`;
           requestBodyCode += `  }\n`;
+        } else {
+          // Check if this is an array field that should be parsed from comma-separated string (e.g., tag_ids)
+          const fieldSchema = endpoint.requestBody && endpoint.requestBody.schema && endpoint.requestBody.schema.properties ? endpoint.requestBody.schema.properties[field.key] : null;
+          const isArrayField = fieldSchema && (fieldSchema.type === 'array' || (fieldSchema.$ref && mapper.resolveRef(fieldSchema.$ref)?.type === 'array'));
+          
+          if (isArrayField && field.type === 'string') {
+            // Array field configured as string input - parse comma-separated values
+            requestBodyCode += `  // Parse comma-separated string into array of numbers for ${field.key}\n`;
+            requestBodyCode += `  if (bundle.inputData.${field.key} !== undefined && bundle.inputData.${field.key} !== '') {\n`;
+            requestBodyCode += `    // Parse comma-separated string into array of numbers\n`;
+            requestBodyCode += `    if (typeof bundle.inputData.${field.key} === 'string') {\n`;
+            requestBodyCode += `      const ${field.key}Array = bundle.inputData.${field.key}\n`;
+            requestBodyCode += `        .split(',')\n`;
+            requestBodyCode += `        .map((id) => parseInt(id.trim(), 10))\n`;
+            requestBodyCode += `        .filter((id) => !isNaN(id));\n`;
+            requestBodyCode += `      requestBody.${field.key} = ${field.key}Array;\n`;
+            requestBodyCode += `    } else if (Array.isArray(bundle.inputData.${field.key})) {\n`;
+            requestBodyCode += `      // Already an array, use as-is (for backwards compatibility)\n`;
+            requestBodyCode += `      requestBody.${field.key} = bundle.inputData.${field.key};\n`;
+            requestBodyCode += `    }\n`;
+            requestBodyCode += `  }\n`;
+          } else {
+            // Regular string field
+            requestBodyCode += `  if (bundle.inputData.${field.key} !== undefined && bundle.inputData.${field.key} !== '') {\n`;
+            requestBodyCode += `    requestBody.${field.key} = bundle.inputData.${field.key};\n`;
+            requestBodyCode += `  }\n`;
+          }
         }
       });
+      
+      // Handle helper fields - merge them into their target properties
+      if (Object.keys(helperFieldsConfig).length > 0) {
+        // Group helper fields by their mapTo property
+        const helperFieldsByTarget = {};
+        Object.entries(helperFieldsConfig).forEach(([helperKey, helperConfig]) => {
+          if (helperConfig.mapTo) {
+            if (!helperFieldsByTarget[helperConfig.mapTo]) {
+              helperFieldsByTarget[helperConfig.mapTo] = [];
+            }
+            helperFieldsByTarget[helperConfig.mapTo].push(helperKey);
+          }
+        });
+        
+        // Generate merging code for each target property
+        Object.entries(helperFieldsByTarget).forEach(([targetProperty, helperKeys]) => {
+          // Check if target property is an array field
+          let isArrayField = false;
+          if (endpoint.requestBody && endpoint.requestBody.schema && endpoint.requestBody.schema.properties) {
+            const targetSchema = endpoint.requestBody.schema.properties[targetProperty];
+            if (targetSchema) {
+              if (targetSchema.type === 'array') {
+                isArrayField = true;
+              } else if (targetSchema.$ref) {
+                const resolved = mapper.resolveRef(targetSchema.$ref);
+                if (resolved && resolved.type === 'array') {
+                  isArrayField = true;
+                }
+              }
+            }
+          }
+          
+          if (isArrayField) {
+            // Generate code to merge helper fields into array property
+            requestBodyCode += `  // Merge helper fields into ${targetProperty}\n`;
+            requestBodyCode += `  const ${targetProperty}HelperIds = [];\n`;
+            helperKeys.forEach(helperKey => {
+              requestBodyCode += `  if (bundle.inputData.${helperKey} !== undefined && bundle.inputData.${helperKey} !== '' && bundle.inputData.${helperKey} !== null && bundle.inputData.${helperKey} !== 0) {\n`;
+              requestBodyCode += `    const parsed = Number(bundle.inputData.${helperKey});\n`;
+              requestBodyCode += `    if (!Number.isNaN(parsed) && parsed !== 0) {\n`;
+              requestBodyCode += `      ${targetProperty}HelperIds.push(parsed);\n`;
+              requestBodyCode += `    }\n`;
+              requestBodyCode += `  }\n`;
+            });
+            
+            // Merge with existing property value (if any)
+            // Check requestBody first (in case it was already set by normal field handling), then bundle.inputData
+            requestBodyCode += `  let ${targetProperty}Existing = [];\n`;
+            requestBodyCode += `  if (requestBody.${targetProperty} && Array.isArray(requestBody.${targetProperty})) {\n`;
+            requestBodyCode += `    ${targetProperty}Existing = requestBody.${targetProperty};\n`;
+            requestBodyCode += `  } else if (bundle.inputData.${targetProperty} !== undefined && bundle.inputData.${targetProperty} !== '') {\n`;
+            requestBodyCode += `    if (typeof bundle.inputData.${targetProperty} === 'string') {\n`;
+            requestBodyCode += `      ${targetProperty}Existing = bundle.inputData.${targetProperty}\n`;
+            requestBodyCode += `        .split(',')\n`;
+            requestBodyCode += `        .map((id) => parseInt(id.trim(), 10))\n`;
+            requestBodyCode += `        .filter((id) => !isNaN(id));\n`;
+            requestBodyCode += `    } else if (Array.isArray(bundle.inputData.${targetProperty})) {\n`;
+            requestBodyCode += `      ${targetProperty}Existing = bundle.inputData.${targetProperty};\n`;
+            requestBodyCode += `    }\n`;
+            requestBodyCode += `  }\n`;
+            
+            // Merge and deduplicate
+            requestBodyCode += `  const ${targetProperty}Merged = [...new Set([...${targetProperty}Existing, ...${targetProperty}HelperIds])].filter(id => id > 0);\n`;
+            requestBodyCode += `  if (${targetProperty}Merged.length > 0) {\n`;
+            requestBodyCode += `    requestBody.${targetProperty} = ${targetProperty}Merged;\n`;
+            requestBodyCode += `  }\n`;
+          } else {
+            // For non-array fields, just use the first helper field value (or existing value)
+            requestBodyCode += `  // Merge helper fields into ${targetProperty}\n`;
+            requestBodyCode += `  if (bundle.inputData.${helperKeys[0]} !== undefined && bundle.inputData.${helperKeys[0]} !== '' && bundle.inputData.${helperKeys[0]} !== null && bundle.inputData.${helperKeys[0]} !== 0) {\n`;
+            requestBodyCode += `    const parsed = Number(bundle.inputData.${helperKeys[0]});\n`;
+            requestBodyCode += `    if (!Number.isNaN(parsed) && parsed !== 0) {\n`;
+            requestBodyCode += `      requestBody.${targetProperty} = parsed;\n`;
+            requestBodyCode += `    }\n`;
+            requestBodyCode += `  }\n`;
+          }
+        });
+      }
     }
     bodyCode = 'body: requestBody,';
   } else {
@@ -640,10 +1308,25 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {})
       const arrayProp = mapper.getArrayPropertyName(schemaToCheck);
       
       if (arrayProp) {
-        // Default behavior: return the full response object
-        // This preserves all properties like skipped_duplicates, has_more, pagination, etc.
-        // Return the full response object (includes all properties)
-        responseCode = '  return response.json;';
+        // Check if response extraction is configured (for simplified actions)
+        const responseExtraction = simplify && simplify.responseExtraction;
+        if (responseExtraction && responseExtraction.extractSingle === true) {
+          const arrayProperty = responseExtraction.arrayProperty || arrayProp;
+          // Extract single item from array for simplified response
+          responseCode = `  // Extract single item from ${arrayProperty} array for simplified response\n` +
+            `  // When simplify.flattenArray is used, we expect a single item in the response\n` +
+            `  if (response.json && response.json.${arrayProperty} && Array.isArray(response.json.${arrayProperty}) && response.json.${arrayProperty}.length > 0) {\n` +
+            `    return response.json.${arrayProperty}[0];\n` +
+            `  }\n` +
+            `  \n` +
+            `  // Fallback to full response if structure is unexpected\n` +
+            `  return response.json;`;
+        } else {
+          // Default behavior: return the full response object
+          // This preserves all properties like skipped_duplicates, has_more, pagination, etc.
+          // Return the full response object (includes all properties)
+          responseCode = '  return response.json;';
+        }
       } else {
         // No array property, just return the response object
         responseCode = '  return response.json;';
@@ -657,15 +1340,6 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {})
   }
 
   // Build input fields code
-  // NOTE: Conditional fields support is temporarily disabled due to Zapier validation issues
-  // Check if conditional fields are configured (but we'll skip them for now)
-  const conditionalFields = actionConfig.conditionalFields || [];
-  const hasConditionalFields = conditionalFields.length > 0;
-  
-  if (hasConditionalFields) {
-    console.warn(`  ⚠️  Warning: Conditional fields configured for "${endpoint.operationId}" but support is temporarily disabled. Fields will be generated as a static array.`);
-  }
-  
   // Helper function to generate a single field definition
   const generateFieldCode = (field) => {
     const indent = '      ';
@@ -698,6 +1372,11 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {})
         // Add placeholder for date fields
         if (child.placeholder) {
           childParts.push(`${childIndent}placeholder: '${child.placeholder}'`);
+        }
+        // Add dynamic property if this child field is dynamic
+        if (child.dynamic && child.dynamicKey) {
+          // Zapier uses just the function name for dynamic dropdowns that return {label, value}
+          childParts.push(`${childIndent}dynamic: '${child.dynamicKey}'`);
         }
         // Note: Zapier doesn't support validate property on input fields
         // Date format validation is handled in the perform function instead
@@ -741,61 +1420,8 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {})
     return `      {\n${parts.join(',\n')}\n      }`;
   };
   
-  // NOTE: Conditional fields support is temporarily disabled
-  // Always generate array format (normal case)
-  // TODO: Re-enable conditional fields when Zapier validation supports function-based inputFields
-  /*
-  let inputFieldsCode = '';
-  if (hasConditionalFields) {
-    // Generate function format for conditional fields
-    const allFieldsCode = inputFields.map(generateFieldCode).join(',\n');
-    
-    // Build conditional logic
-    let conditionalLogic = '';
-    conditionalLogic += `    // Handle undefined bundle.inputData during validation\n`;
-    conditionalLogic += `    if (!bundle || !bundle.inputData) {\n`;
-    conditionalLogic += `      return fields;\n`;
-    conditionalLogic += `    }\n`;
-    conditionalLogic += `    \n`;
-    
-    conditionalFields.forEach(cond => {
-      const fieldKey = cond.field;
-      const hideWhen = cond.hideWhen || {};
-      const conditions = Object.entries(hideWhen).map(([key, value]) => {
-        // Handle boolean, string, number comparisons
-        // Use != null to check for both null and undefined
-        if (typeof value === 'boolean') {
-          return `bundle.inputData.${key} != null && bundle.inputData.${key} === ${JSON.stringify(value)}`;
-        } else if (typeof value === 'string') {
-          return `bundle.inputData.${key} != null && bundle.inputData.${key} === '${value.replace(/'/g, "\\'")}'`;
-        } else {
-          return `bundle.inputData.${key} != null && bundle.inputData.${key} === ${JSON.stringify(value)}`;
-        }
-      }).join(' && ');
-      
-      conditionalLogic += `    // Hide ${fieldKey} when: ${Object.entries(hideWhen).map(([k, v]) => `${k} === ${JSON.stringify(v)}`).join(' && ')}\n`;
-      conditionalLogic += `    if (${conditions}) {\n`;
-      conditionalLogic += `      fields = fields.filter(f => f.key !== '${fieldKey}');\n`;
-      conditionalLogic += `    }\n`;
-    });
-    
-    inputFieldsCode = `(z, bundle) => {
-    let fields = [
-${allFieldsCode}
-    ];
-${conditionalLogic}
-    return fields;
-  }`;
-  } else {
-    // Generate array format (normal case)
-    inputFieldsCode = inputFields.length > 0
-      ? '[\n' + inputFields.map(generateFieldCode).join(',\n') + '\n    ]'
-      : '[]';
-  }
-  */
-  
-  // Always generate array format (conditional fields disabled)
-  const inputFieldsCode = inputFields.length > 0
+  // Generate array format for input fields
+  let inputFieldsCode = inputFields.length > 0
     ? '[\n' + inputFields.map(generateFieldCode).join(',\n') + '\n    ]'
     : '[]';
 
@@ -841,15 +1467,82 @@ ${conditionalLogic}
   // Add cleanInputData: false for better predictability (D028)
   const cleanInputDataCode = 'cleanInputData: false,';
 
-  // Escape description for JavaScript string (handle newlines, quotes, etc.)
-  const escapeForJsString = (str) => {
-    if (!str) return '';
-    return str
-      .replace(/\\/g, '\\\\')  // Escape backslashes first
-      .replace(/'/g, "\\'")     // Escape single quotes
-      .replace(/\n/g, '\\n')    // Escape newlines
-      .replace(/\r/g, '\\r');   // Escape carriage returns
-  };
+  // Generate dynamicFields code if configured
+  let dynamicFieldsCode = '';
+  
+  if (dynamicFieldKeys.size > 0) {
+    // Mark fields as dynamic in inputFields (including nested child fields)
+    // Use sourceTrigger to look up trigger key and generate dynamic: "triggerKey.fieldName" format
+    inputFields.forEach(field => {
+      if (dynamicFieldKeys.has(field.key)) {
+        const fieldConfig = dynamicFieldsConfig[field.key];
+        const sourceTrigger = fieldConfig.sourceTrigger;
+        const valueField = fieldConfig.valueField || 'id';
+        
+        if (sourceTrigger) {
+          // Look up trigger config to verify it exists
+          // The JSON key IS the trigger key
+          const triggerConfigs = triggerConfig.triggers || {};
+          const triggerExists = triggerConfigs[sourceTrigger] !== undefined;
+          
+          if (triggerExists) {
+            // Add dynamic property using trigger key format: "triggerKey.fieldName"
+            field.dynamic = true;
+            field.dynamicKey = `${sourceTrigger}.${valueField}`;
+          } else {
+            console.warn(`  ⚠️  Warning: Source trigger "${sourceTrigger}" for dynamic field "${field.key}" not found in trigger config. Skipping dynamic field.`);
+          }
+        }
+      }
+      // Also check child fields (for nested object fields like simplify.flattenArray)
+      if (field.children && Array.isArray(field.children)) {
+        field.children.forEach(childField => {
+          if (dynamicFieldKeys.has(childField.key)) {
+            const fieldConfig = dynamicFieldsConfig[childField.key];
+            const sourceTrigger = fieldConfig.sourceTrigger;
+            const valueField = fieldConfig.valueField || 'id';
+            
+            if (sourceTrigger) {
+              // Look up trigger config to verify it exists
+              // The JSON key IS the trigger key
+              const triggerConfigs = triggerConfig.triggers || {};
+              const triggerExists = triggerConfigs[sourceTrigger] !== undefined;
+              
+              if (triggerExists) {
+                // Add dynamic property using trigger key format: "triggerKey.fieldName"
+                childField.dynamic = true;
+                childField.dynamicKey = `${sourceTrigger}.${valueField}`;
+              } else {
+                console.warn(`  ⚠️  Warning: Source trigger "${sourceTrigger}" for dynamic field "${childField.key}" not found in trigger config. Skipping dynamic field.`);
+              }
+            }
+          }
+        });
+      }
+    });
+    
+    // Regenerate inputFieldsCode with dynamic fields marked
+    // Note: generateFieldCode now handles dynamic properties for child fields directly
+    const generateFieldCodeWithDynamic = (field) => {
+      const baseCode = generateFieldCode(field);
+      if (field.dynamic && field.dynamicKey) {
+        // Add dynamic property before the closing brace for top-level fields
+        // Format: dynamic: "triggerKey.fieldName"
+        return baseCode.replace(/\n      \}$/, ',\n      dynamic: \'' + field.dynamicKey + '\'\n      }');
+      }
+      return baseCode;
+    };
+    
+    const updatedInputFieldsCode = inputFields.length > 0
+      ? '[\n' + inputFields.map(generateFieldCodeWithDynamic).join(',\n') + '\n    ]'
+      : '[]';
+    
+    // Update inputFieldsCode with dynamic fields
+    inputFieldsCode = updatedInputFieldsCode;
+    
+    // No need to generate functions - dynamic dropdowns use triggers directly
+    dynamicFieldsCode = '';
+  }
 
   // Truncate description to 1000 characters (Zapier limit)
   let description = endpoint.description || endpoint.summary || '';
@@ -875,15 +1568,17 @@ ${conditionalLogic}
     inputFieldsCode,
     sampleCode,
     cleanInputDataCode,
+    dynamicFieldsCode,
   };
 
   return generator.generate('action.template.js', templateData);
 }
 
-// Generate trigger file for an endpoint (similar to action but for polling)
+// Generate trigger file for an endpoint (similar to action but for polling,
+// webhooks or dynamic dropdowns)
 function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
   const endpoint = triggerConfig.endpoint;
-  const key = triggerConfig.key || endpoint.operationId || endpoint.path.replace(/\//g, '_').replace(/^_/, '');
+  const key = triggerConfig.key; // Key is always set when creating trigger objects
   const noun = mapper.getNoun(endpoint.operationId, endpoint.path);
   // Use custom name if provided, otherwise use title case of summary
   // Apply titleCase to custom name if provided, otherwise use titleCase on endpoint info
@@ -964,6 +1659,16 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
     queryParamsCode = '  // No query parameters';
   }
 
+  // Detect if pagination is supported (has limit and offset params, and response has has_more)
+  // Limit can be auto-set or user-provided - we just need it to exist
+  const hasLimitParam = queryParams.some(p => p.name === 'limit');
+  const hasOffsetParam = queryParams.some(p => p.name === 'offset');
+  
+  // We'll check for has_more after we resolve the schema for responseCode
+  // This ensures we use the same resolved schema for both checks
+  let hasHasMoreProperty = false;
+  let resolvedSchemaForPagination = null;
+
   // Build response code (for triggers, return array or array property)
   // Triggers must return an array of items for Zapier to process and deduplicate
   // Zapier will automatically extract 'id' from each item and deduplicate all items
@@ -972,10 +1677,20 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
   // Check if arrayProperty is explicitly configured in trigger config
   const configuredArrayProp = triggerConfig.arrayProperty;
   
+  // Track the array property found (for pagination fallback detection)
+  let detectedArrayProp = null;
+  
   if (configuredArrayProp) {
     // Use explicitly configured array property (most reliable)
     // Zapier will process ALL items in this array and deduplicate each by 'id'
-    responseCode = `response.json.${configuredArrayProp} || []`;
+    // Handle nested structures like { recurring_items: { recurring_items: [...] } }
+    detectedArrayProp = configuredArrayProp;
+    if (configuredArrayProp === 'recurring_items') {
+      // Special handling for recurring_items which may have nested structure
+      responseCode = `let results = [];\n  if (response.json && response.json.recurring_items) {\n    // Handle nested structure: { recurring_items: { recurring_items: [...] } }\n    if (Array.isArray(response.json.recurring_items)) {\n      results = response.json.recurring_items;\n    } else if (response.json.recurring_items.recurring_items && Array.isArray(response.json.recurring_items.recurring_items)) {\n      results = response.json.recurring_items.recurring_items;\n    }\n  } else if (Array.isArray(response.json)) {\n    results = response.json;\n  }\n  results`;
+    } else {
+      responseCode = `response.json.${configuredArrayProp} || []`;
+    }
   } else if (successResponse && successResponse.schema) {
     // Auto-detect: First, resolve $ref if present to get the actual schema structure
     let schemaToCheck = successResponse.schema;
@@ -985,6 +1700,9 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
         schemaToCheck = resolved;
       }
     }
+    
+    // Store resolved schema for has_more detection later
+    resolvedSchemaForPagination = schemaToCheck;
     
     // getArrayPropertyName handles $ref resolution internally, so call it first
     let arrayProp = mapper.getArrayPropertyName(schemaToCheck);
@@ -1012,6 +1730,7 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
       // Response is an object with an array property (e.g., { transactions: [...] })
       // Extract the array property - Zapier will process ALL items in the array
       // and deduplicate each one by comparing their 'id' fields against previously seen IDs
+      detectedArrayProp = arrayProp;
       responseCode = `response.json.${arrayProp} || []`;
     } else if (schemaToCheck && schemaToCheck.type === 'array') {
       // Response is directly an array
@@ -1025,20 +1744,214 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
     responseCode = 'response.json || []';
   }
   
-  // Use filter code from config if provided, otherwise placeholder
-  const filterCode = triggerConfig.filterCode || '  // Add custom filtering logic here if needed';
+  // Now check for has_more property using the resolved schema (if we have one)
+  // Also use fallback: if we have limit/offset and found an array property, assume pagination
+  if (resolvedSchemaForPagination) {
+    if (resolvedSchemaForPagination.type === 'object' && resolvedSchemaForPagination.properties && resolvedSchemaForPagination.properties.has_more) {
+      hasHasMoreProperty = true;
+    }
+  }
+  
+  // Fallback: if we have limit/offset params and found an array property in response, assume pagination
+  // This handles cases where has_more isn't in the schema but the API supports it
+  if (!hasHasMoreProperty && hasLimitParam && hasOffsetParam && detectedArrayProp) {
+    hasHasMoreProperty = true; // Assume pagination is supported
+  }
+  
+  // Determine if pagination should be used (for polling triggers only, not hidden triggers)
+  const isHidden = triggerConfig.hidden === true;
+  const shouldUsePagination = !isHidden && hasLimitParam && hasOffsetParam && hasHasMoreProperty;
+  
+  // Add default limit handling if pagination is supported
+  // We need to ensure 'limit' variable exists for the pagination loop
+  if (shouldUsePagination) {
+    // Check if limit is auto-set or user-provided
+    const limitIsAutoSet = autoQueryParamKeys.has('limit');
+    const limitParam = queryParams.find(p => p.name === 'limit');
+    
+    if (limitIsAutoSet) {
+      // Limit is auto-set - we still need the limit variable for pagination loop
+      // Extract the auto-set value and create limit variable
+      const autoLimitValue = autoQueryParams.limit;
+      const limitValueStr = typeof autoLimitValue === 'string' ? `'${autoLimitValue}'` : JSON.stringify(autoLimitValue);
+      // Replace the auto-set line with one that also creates the limit variable
+      queryParamsCode = queryParamsCode.replace(
+        new RegExp(`params\\.limit = ${limitValueStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')};`),
+        `const limit = bundle.inputData.limit || ${limitValueStr};\n  params.limit = limit;`
+      );
+    } else if (limitParam) {
+      // Limit param is user-provided - ensure we create the limit variable with default
+      // The queryParamsCode will have: if (bundle.inputData.limit) { params.limit = bundle.inputData.limit; }
+      // We need to change it to: const limit = bundle.inputData.limit || 100; params.limit = limit;
+      if (queryParamsCode.includes(`if (bundle.inputData.limit)`)) {
+        queryParamsCode = queryParamsCode.replace(
+          /if \(bundle\.inputData\.limit\) \{\s+params\.limit = bundle\.inputData\.limit;\s+\}/,
+          'const limit = bundle.inputData.limit || 100;\n  params.limit = limit;'
+        );
+      } else if (!queryParamsCode.includes('const limit')) {
+        // Limit param handling not generated yet - add it explicitly
+        queryParamsCode = queryParamsCode.replace(
+          /(const params = \{\};)/,
+          '$1\n  // Set a default limit to ensure we get results\n  const limit = bundle.inputData.limit || 100;\n  params.limit = limit;'
+        );
+      }
+    } else {
+      // Limit param doesn't exist - add it (shouldn't happen if hasLimitParam is true)
+      queryParamsCode += '  // Set a default limit to ensure we get results\n';
+      queryParamsCode += '  const limit = bundle.inputData.limit || 100;\n';
+      queryParamsCode += '  params.limit = limit;\n';
+    }
+  }
+  
+  // Generate sorting code for polling triggers (sort by id descending for better deduplication)
+  // Only add sorting for non-hidden triggers (polling triggers)
+  let sortCode = '';
+  if (!isHidden) {
+    sortCode = `
+  // Ensure each result has a unique id for deduplication
+  // Zapier uses the 'id' field automatically for deduplication
+  // Sort by id descending (newest first) for better polling performance
+  // NOTE: If API already returns sorted by ID descending, this is redundant but safe
+  results = results.sort((a, b) => (b.id || 0) - (a.id || 0));`;
+  }
+
+  // Generate filter code from filters config (for hidden triggers) or filterCode (for custom JavaScript)
+  let filterCode = '';
+  const filters = triggerConfig.filters || {};
+  
+  if (Object.keys(filters).length > 0) {
+    // Generate filter code from filters object (simple property-based filtering)
+    const filterConditions = Object.entries(filters).map(([filterKey, filterValue]) => {
+      if (typeof filterValue === 'boolean') {
+        return `item.${filterKey} === ${filterValue}`;
+      } else if (typeof filterValue === 'string') {
+        return `item.${filterKey} === '${filterValue.replace(/'/g, "\\'")}'`;
+      } else if (typeof filterValue === 'number') {
+        return `item.${filterKey} === ${filterValue}`;
+      } else if (filterValue === null) {
+        return `item.${filterKey} === null`;
+      } else {
+        return `item.${filterKey} === ${JSON.stringify(filterValue)}`;
+      }
+    });
+    
+    filterCode = `\n  // Filter results based on config\n  results = results.filter((item) => {\n    return ${filterConditions.join(' &&\n    ')};\n  });`;
+  } else if (triggerConfig.filterCode && triggerConfig.filterCode.trim() !== '// No custom filtering') {
+    // Use custom filter code from config (for complex JavaScript filtering logic)
+    // The filterCode may contain newlines, so we need to preserve them
+    filterCode = '\n  ' + triggerConfig.filterCode;
+  } else {
+    filterCode = '\n  // Add custom filtering logic here if needed';
+  }
+  
+  // Generate label template code (for hidden triggers with label config)
+  // Only generate if label config is provided (not all triggers need labels)
+  let labelCode = '';
+  const labelConfig = triggerConfig.label || null;
+  if (isHidden && labelConfig && labelConfig.template) {
+    const template = labelConfig.template;
+    const fallback = labelConfig.fallback || '`${item.id}`';
+    
+    // Generate code matching the manual implementation (like getAllRecurring)
+    // Extract simple property accesses from template and use optional chaining
+    // Example: "${transaction_criteria.payee} - ${transaction_criteria.amount}"
+    // becomes: const payee = item.transaction_criteria?.payee || ""; const amount = item.transaction_criteria?.amount || "";
+    // then: const name = `${payee} - ${amount}`.trim();
+    
+    // Find all ${variable} references (only simple property accesses, not complex expressions)
+    const simpleVarPattern = /\$\{([a-zA-Z_][a-zA-Z0-9_.]*)\}/g;
+    const templateVars = new Set();
+    let match;
+    while ((match = simpleVarPattern.exec(template)) !== null) {
+      templateVars.add(match[1]);
+    }
+    while ((match = simpleVarPattern.exec(fallback)) !== null) {
+      templateVars.add(match[1]);
+    }
+    
+    // Generate variable extraction code
+    let varCode = '';
+    const varMap = new Map();
+    Array.from(templateVars).forEach(varExpr => {
+      const parts = varExpr.split('.');
+      let varName = parts[parts.length - 1]; // Use last part as variable name
+      // Avoid conflict with 'name' variable (used for the final label)
+      // If varName is 'name', use a different name like 'itemName'
+      if (varName === 'name') {
+        varName = 'itemName';
+      }
+      let accessor = 'item';
+      parts.forEach(part => {
+        accessor += `?.${part}`;
+      });
+      varCode += `    const ${varName} = ${accessor} || '';\n`;
+      varMap.set(varExpr, varName);
+    });
+    
+    // Check if template or fallback has nested template literals (complex expressions)
+    // Examples: "${description || `Recurring ${id}`}"
+    const templateHasNested = template.includes('`') || template.match(/\$\{[^}]*\$\{/);
+    const fallbackHasNested = fallback.includes('`') || fallback.match(/\$\{[^}]*\$\{/);
+    const hasNestedTemplates = templateHasNested || fallbackHasNested;
+    
+    // Process templates based on complexity
+    let processedTemplate = template;
+    let processedFallback = fallback;
+    
+    if (hasNestedTemplates) {
+      // Complex template with nested literals - use Function constructor to evaluate
+      // If template is simple, process it like a simple template
+      if (!templateHasNested) {
+        processedTemplate = replaceTemplateVars(template, varMap);
+      } else {
+        // Template has nested templates - replace all variables with item.property access
+        processedTemplate = replaceTemplateVarsForNested(template);
+      }
+      
+      // Fallback has nested templates - replace all variables with item.property access
+      processedFallback = replaceTemplateVarsForNested(fallback);
+      
+      // If template is simple but fallback is complex, use simple template literals for template
+      // and Function constructor only for fallback
+      if (!templateHasNested && fallbackHasNested) {
+        const escapedTemplate = escapeForTemplate(processedTemplate);
+        const escapedFallback = escapeForFunctionString(processedFallback);
+        labelCode = generateSimpleTemplateComplexFallbackCode(varCode, escapedTemplate, escapedFallback);
+      } else if (templateHasNested) {
+        // Both template and fallback are complex - use Function constructor for both
+        const escapedTemplate = escapeForFunctionString(processedTemplate);
+        const escapedFallback = escapeForFunctionString(processedFallback);
+        labelCode = generateComplexTemplateComplexFallbackCode(varCode, escapedTemplate, escapedFallback);
+      }
+    } else {
+      // Simple template - replace variables and use directly
+      processedTemplate = replaceTemplateVars(template, varMap);
+      processedFallback = replaceTemplateVars(fallback, varMap);
+      
+      const escapedTemplate = escapeForTemplate(processedTemplate);
+      const escapedFallback = escapeForTemplate(processedFallback);
+      labelCode = generateSimpleTemplateSimpleFallbackCode(varCode, escapedTemplate, escapedFallback);
+    }
+  }
+  
+  // For hidden triggers, add placeholder input field if none exist (D009 requirement)
+  if (isHidden && inputFields.length === 0) {
+    inputFields.push({
+      key: 'id_placeholder',
+      label: 'ID Placeholder',
+      type: 'string',
+      helpText: 'This is a placeholder field to satisfy Zapier validation (D009).',
+      default: 'placeholder',
+      required: false,
+    });
+  }
 
   // Build input fields code
   const inputFieldsCode = inputFields.length > 0
     ? '\n' + inputFields.map(field => {
         const parts = [`      key: '${field.key}'`, `label: '${field.label}'`, `type: '${field.type}'`];
         if (field.helpText) {
-          const escapedHelpText = field.helpText
-            .replace(/\\/g, '\\\\')
-            .replace(/'/g, "\\'")
-            .replace(/\n/g, '\\n')
-            .replace(/\r/g, '\\r');
-          parts.push(`helpText: '${escapedHelpText}'`);
+          parts.push(`helpText: '${escapeForJsString(field.helpText)}'`);
         }
         if (field.required) {
           parts.push('required: true');
@@ -1129,27 +2042,122 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
   
   const sampleCode = `sample: ${JSON.stringify(sampleObject, null, 2)},`;
 
-  // Escape description
-  const escapeForJsString = (str) => {
-    if (!str) return '';
-    return str
-      .replace(/\\/g, '\\\\')
-      .replace(/'/g, "\\'")
-      .replace(/\n/g, '\\n')
-      .replace(/\r/g, '\\r');
-  };
-
-  // Use title from config (required and validated), fallback to endpoint description
-  let description = triggerConfig.title || endpoint.description || endpoint.summary || '';
-  
-  // Ensure description ends with a period (Zapier requirement D021)
-  if (description && !description.trim().endsWith('.')) {
-    description = description.trim() + '.';
+  // Use title from config (required and validated for non-hidden), fallback to endpoint description
+  let description = '';
+  if (isHidden) {
+    description = 'Hidden trigger for dynamic dropdowns.';
+  } else {
+    description = triggerConfig.title || endpoint.description || endpoint.summary || '';
+    // Ensure description ends with a period (Zapier requirement D021)
+    if (description && !description.trim().endsWith('.')) {
+      description = description.trim() + '.';
+    }
+    // Truncate description to 1000 characters (Zapier limit)
+    if (description.length > 1000) {
+      description = description.substring(0, 997) + '...';
+    }
   }
   
-  // Truncate description to 1000 characters (Zapier limit)
-  if (description.length > 1000) {
-    description = description.substring(0, 997) + '...';
+  // Build hidden property for display object
+  const hiddenProperty = isHidden ? ',\n    hidden: true' : '';
+
+  // Generate request code - either single request or pagination loop
+  let requestCode = '';
+  if (shouldUsePagination) {
+    // Generate pagination loop that fetches all pages
+    // First, we need to determine the array property name for pageResults
+    let arrayPropForPagination = '';
+    if (configuredArrayProp) {
+      arrayPropForPagination = configuredArrayProp === 'recurring_items' 
+        ? 'response.json.recurring_items || (response.json.recurring_items?.recurring_items || [])'
+        : `response.json.${configuredArrayProp} || []`;
+    } else if (successResponse && successResponse.schema) {
+      let schemaToCheck = successResponse.schema;
+      if (schemaToCheck.$ref) {
+        const resolved = mapper.resolveRef(schemaToCheck.$ref);
+        if (resolved) {
+          schemaToCheck = resolved;
+        }
+      }
+      let arrayProp = mapper.getArrayPropertyName(schemaToCheck);
+      if (!arrayProp && schemaToCheck.type === 'object' && schemaToCheck.properties) {
+        const commonArrayNames = ['transactions', 'items', 'data', 'results', 'records', 'list'];
+        for (const propName of commonArrayNames) {
+          if (schemaToCheck.properties[propName]) {
+            const prop = schemaToCheck.properties[propName];
+            let propSchema = prop;
+            if (prop.$ref) {
+              propSchema = mapper.resolveRef(prop.$ref) || prop;
+            }
+            if (propSchema && propSchema.type === 'array') {
+              arrayProp = propName;
+              break;
+            }
+          }
+        }
+      }
+      if (arrayProp) {
+        arrayPropForPagination = `response.json.${arrayProp} || []`;
+      } else if (schemaToCheck && schemaToCheck.type === 'array') {
+        arrayPropForPagination = 'response.json || []';
+      } else {
+        arrayPropForPagination = 'response.json || []';
+      }
+    } else {
+      arrayPropForPagination = 'response.json || []';
+    }
+    
+    requestCode = `  // For polling triggers, Zapier doesn't automatically paginate
+  // We need to manually fetch all pages by looping until has_more is false
+  // This ensures we get all items, not just the first page
+  let allResults = [];
+  let offset = 0;
+  let hasMore = true;
+  
+  while (hasMore) {
+    // Create a fresh params object for each page request to avoid mutating
+    const pageParams = { ...params };
+    pageParams.offset = offset;
+    
+    const response = await z.request({
+      method: '${endpoint.method.toUpperCase()}',
+      url: url,
+      params: pageParams,
+      headers: {
+        Authorization: \`Bearer \${bundle.authData.access_token}\`,
+        'Content-Type': 'application/json',
+      },
+    });
+    
+    const pageResults = ${arrayPropForPagination};
+    
+    if (pageResults.length > 0) {
+      allResults = allResults.concat(pageResults);
+    }
+    
+    // Check if there are more pages
+    // Continue if API says has_more AND we got a full page (indicating there might be more)
+    hasMore = response.json.has_more === true && pageResults.length === limit;
+    if (hasMore) {
+      offset += limit;
+    }
+  }
+  
+  // Use allResults from pagination
+  let results = allResults;`;
+  } else {
+    // Single request (no pagination)
+    requestCode = `  const response = await z.request({
+    method: '${endpoint.method.toUpperCase()}',
+    url: url,
+    ${paramsCode}
+    headers: {
+      Authorization: \`Bearer \${bundle.authData.access_token}\`,
+      'Content-Type': 'application/json',
+    },
+  });
+
+  let results = ${responseCode};`;
   }
 
   const templateData = {
@@ -1157,6 +2165,7 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
     noun,
     displayLabel,
     description: escapeForJsString(description),
+    hiddenProperty,
     operationId: endpoint.operationId,
     method: endpoint.method.toUpperCase(),
     path: endpoint.path,
@@ -1165,7 +2174,10 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
     queryParamsCode,
     paramsCode,
     responseCode,
+    requestCode,
+    sortCode,
     filterCode,
+    labelCode,
     inputFieldsCode,
     sampleCode,
   };
@@ -1183,13 +2195,16 @@ function generateAuthentication(baseUrl, generator, authConfig) {
   // Build connectionLabel code
   let connectionLabelCode;
   if (authConfig.connectionLabel.type === 'function') {
-    // Function format: (bundle) => { ... }
-    connectionLabelCode = `(bundle) => ${authConfig.connectionLabel.value}`;
-  } else {
-    // String format: just the string value
-    connectionLabelCode = `"${authConfig.connectionLabel.value}"`;
-  }
-  
+    // Check if it's an async function (contains await or starts with {)
+    const isAsync = authConfig.connectionLabel.value.includes('await') || authConfig.connectionLabel.value.trim().startsWith('{');
+    if (isAsync) {
+      // Async function format: async (z, bundle) => { ... }
+      connectionLabelCode = `async (z, bundle) => ${authConfig.connectionLabel.value}`;
+    } else {
+      // Regular function format: (bundle) => { ... }
+      connectionLabelCode = `(bundle) => ${authConfig.connectionLabel.value}`;
+    }
+  }  
   // Build Authorization header string (fieldKey needs to be inserted into template literal)
   const authHeader = `Authorization: \`Bearer \${bundle.authData.${authConfig.fieldKey}}\`,`;
   
@@ -1210,10 +2225,42 @@ function generateAuthentication(baseUrl, generator, authConfig) {
 
 // Generate index.js
 function generateIndex(version, actions, triggers, generator, authConfig) {
-  const actionsRequires = actions.map(a => `const ${a.key} = require('./actions/${a.key}');`).join('\n') || '// No actions';
-  const triggersRequires = triggers.map(t => `const ${t.key} = require('./triggers/${t.key}');`).join('\n') || '// No triggers';
-  const actionsCode = actions.map(a => `    ${a.key}: ${a.key}`).join(',\n') || '    // No actions';
-  const triggersCode = triggers.map(t => `    ${t.key}: ${t.key}`).join(',\n') || '    // No triggers';
+  // Build requires - handle case where same key exists as both action and trigger
+  const actionKeys = new Set(actions.map(a => a.key));
+  const triggerKeys = new Set(triggers.map(t => t.key));
+  
+  // For keys that exist in both, we need to use different variable names
+  const actionsRequires = actions.map(a => {
+    const key = a.key;
+    // If this key also exists as a trigger, use a suffix for the action
+    if (triggerKeys.has(key)) {
+      return `const ${key}Action = require('./actions/${key}');`;
+    }
+    return `const ${key} = require('./actions/${key}');`;
+  }).join('\n') || '// No actions';
+  
+  const triggersRequires = triggers.map(t => {
+    const key = t.key;
+    // If this key also exists as an action, use a suffix for the trigger
+    if (actionKeys.has(key)) {
+      return `const ${key}Trigger = require('./triggers/${key}');`;
+    }
+    return `const ${key} = require('./triggers/${key}');`;
+  }).join('\n') || '// No triggers';
+  
+  const actionsCode = actions.map(a => {
+    const key = a.key;
+    // Use the appropriate variable name based on whether trigger exists
+    const varName = triggerKeys.has(key) ? `${key}Action` : key;
+    return `    ${key}: ${varName}`;
+  }).join(',\n') || '    // No actions';
+  
+  const triggersCode = triggers.map(t => {
+    const key = t.key;
+    // Use the appropriate variable name based on whether action exists
+    const varName = actionKeys.has(key) ? `${key}Trigger` : key;
+    return `    ${key}: ${varName}`;
+  }).join(',\n') || '    // No triggers';
   
   // Build beforeRequest hook code with dynamic fieldKey
   const fieldKey = authConfig.fieldKey || 'access_token';
@@ -1310,11 +2357,17 @@ function generateIndex(version, actions, triggers, generator, authConfig) {
 // For zapier-platform-core, we use version 18.x which requires Node 22+
 function getExactVersion(packageName) {
   try {
+    process.stdout.write(`  📦 Fetching version for ${packageName}... `);
     let version;
+    const timeout = 10000; // 10 second timeout
     if (packageName === 'zapier-platform-core' || packageName === 'zapier-platform-cli') {
       // Use version 18.x (requires Node 22+)
       // Get all versions and find the latest 18.x
-      const versionsJson = execSync(`npm view ${packageName} versions --json`, { encoding: 'utf8' });
+      const versionsJson = execSync(`npm view ${packageName} versions --json`, { 
+        encoding: 'utf8',
+        timeout: timeout,
+        maxBuffer: 1024 * 1024 * 10 // 10MB buffer
+      });
       const versions = JSON.parse(versionsJson);
       // Filter for 18.x versions and get the latest
       const v18Versions = versions.filter(v => v.startsWith('18.'));
@@ -1322,14 +2375,24 @@ function getExactVersion(packageName) {
         version = v18Versions[v18Versions.length - 1];
       } else {
         // Fallback to latest if no 18.x found
-        version = execSync(`npm view ${packageName} version`, { encoding: 'utf8' }).trim();
+        version = execSync(`npm view ${packageName} version`, { 
+          encoding: 'utf8',
+          timeout: timeout,
+          maxBuffer: 1024 * 1024
+        }).trim();
       }
     } else {
-      version = execSync(`npm view ${packageName} version`, { encoding: 'utf8' }).trim();
+      version = execSync(`npm view ${packageName} version`, { 
+        encoding: 'utf8',
+        timeout: timeout,
+        maxBuffer: 1024 * 1024
+      }).trim();
     }
+    console.log(version);
     return version;
   } catch (error) {
-    console.warn(`Warning: Could not fetch version for ${packageName}, using fallback`);
+    console.log('(using fallback)');
+    console.warn(`  ⚠️  Warning: Could not fetch version for ${packageName}, using fallback`);
     // Fallback to a known working version
     if (packageName === 'zapier-platform-core') {
       return '18.0.1';
@@ -1404,12 +2467,18 @@ async function generate() {
     process.exit(1);
   }
 
-  const version = parser.getVersion();
+  // Use override version if provided, otherwise get from OpenAPI spec
+  let version = config.version;
   if (!version) {
-    console.error('❌ Error: Could not extract version from OpenAPI schema');
-    process.exit(1);
+    version = parser.getVersion();
+    if (!version) {
+      console.error('❌ Error: Could not extract version from OpenAPI schema and no --version override provided');
+      process.exit(1);
+    }
+    console.log(`📌 Detected version from OpenAPI spec: ${version}`);
+  } else {
+    console.log(`📌 Using override version: ${version}`);
   }
-  console.log(`📌 Detected version: ${version}`);
 
   const baseUrl = parser.getBaseUrl();
   console.log(`🌐 Base URL: ${baseUrl}`);
@@ -1474,40 +2543,75 @@ async function generate() {
     }
     
     // Check if this endpoint should also be a trigger (from config only)
-    const pathKey = endpoint.path;
-    const triggerConfigForPath = triggerConfig.triggers?.[pathKey];
+    // Find all triggers that match this endpoint path
+    const endpointPath = endpoint.path;
+    const allTriggerConfigs = triggerConfig.triggers || {};
     
-    if (triggerConfigForPath) {
-      const triggerKey = triggerConfigForPath.key || endpoint.operationId;
-      
-      // Validate required title field
-      if (!triggerConfigForPath.title) {
-        console.error(`❌ Error: Trigger config for "${pathKey}" is missing required "title" field`);
-        process.exit(1);
-      }
-      
-      // Validate title format (must start with "Triggers when ")
-      if (!triggerConfigForPath.title.startsWith('Triggers when ')) {
-        console.error(`❌ Error: Trigger config for "${pathKey}" has invalid title format. Title must start with "Triggers when "`);
-        console.error(`   Current title: "${triggerConfigForPath.title}"`);
-        process.exit(1);
-      }
-      
-      // Only add trigger once per key (avoid duplicates when multiple methods share same path)
-      if (!addedTriggerKeys.has(triggerKey)) {
-        triggers.push({
-          endpoint,
-          key: triggerKey,
-          customName: triggerConfigForPath.name,
-          title: triggerConfigForPath.title,
-          arrayProperty: triggerConfigForPath.arrayProperty,
-          queryParams: triggerConfigForPath.queryParams || {},
-          filterCode: triggerConfigForPath.filter || '  // No custom filtering',
-        });
-        addedTriggerKeys.add(triggerKey);
+    for (const [triggerKey, triggerConfigForPath] of Object.entries(allTriggerConfigs)) {
+      // Match triggers by endpoint property
+      if (triggerConfigForPath.endpoint === endpointPath) {
+        const isHidden = triggerConfigForPath.hidden === true;
+        
+        // Validate required title field (only for non-hidden triggers)
+        if (!isHidden && !triggerConfigForPath.title) {
+          console.error(`❌ Error: Trigger config "${triggerKey}" is missing required "title" field`);
+          process.exit(1);
+        }
+        
+        // Validate title format (must start with "Triggers when ") - only for non-hidden triggers
+        if (!isHidden && triggerConfigForPath.title && !triggerConfigForPath.title.startsWith('Triggers when ')) {
+          console.error(`❌ Error: Trigger config "${triggerKey}" has invalid title format. Title must start with "Triggers when "`);
+          console.error(`   Current title: "${triggerConfigForPath.title}"`);
+          process.exit(1);
+        }
+        
+        // Only add trigger once per key (avoid duplicates when multiple methods share same path)
+        if (!addedTriggerKeys.has(triggerKey)) {
+          triggers.push({
+            endpoint,
+            key: triggerKey,
+            customName: triggerConfigForPath.name,
+            title: triggerConfigForPath.title,
+            arrayProperty: triggerConfigForPath.arrayProperty,
+            queryParams: triggerConfigForPath.queryParams || {},
+            filterCode: triggerConfigForPath.filterCode || '  // No custom filtering',
+            hidden: triggerConfigForPath.hidden || false,
+            filters: triggerConfigForPath.filters || {},
+            label: triggerConfigForPath.label || null,
+          });
+          addedTriggerKeys.add(triggerKey);
+        }
       }
     }
     // Auto-detection disabled: only create triggers explicitly defined in triggers-config.json
+  }
+  
+  // Also generate hidden triggers that are referenced in dynamicFields but might not match endpoints
+  // This ensures all triggers needed for dynamic dropdowns are generated
+  const allTriggerConfigs = triggerConfig.triggers || {};
+  for (const [triggerKey, triggerConfigForPath] of Object.entries(allTriggerConfigs)) {
+    if (triggerConfigForPath.hidden === true) {
+      if (triggerKey && !addedTriggerKeys.has(triggerKey)) {
+        // Find the endpoint for this trigger's endpoint path
+        const endpointPath = triggerConfigForPath.endpoint;
+        const matchingEndpoint = endpoints.find(e => e.path === endpointPath && e.method.toLowerCase() === 'get');
+        if (matchingEndpoint) {
+          triggers.push({
+            endpoint: matchingEndpoint,
+            key: triggerKey,
+            customName: triggerConfigForPath.name,
+            title: triggerConfigForPath.title || 'Hidden trigger for dynamic dropdowns.',
+            arrayProperty: triggerConfigForPath.arrayProperty,
+            queryParams: triggerConfigForPath.queryParams || {},
+            filterCode: triggerConfigForPath.filterCode || '  // No custom filtering',
+            hidden: true,
+            filters: triggerConfigForPath.filters || {},
+            label: triggerConfigForPath.label || null,
+          });
+          addedTriggerKeys.add(triggerKey);
+        }
+      }
+    }
   }
 
   // Generate files
@@ -1521,7 +2625,14 @@ async function generate() {
 
   // Generate action files
   for (const action of actions) {
-    const code = generateAction(action.endpoint, baseUrl, mapper, generator, action.actionConfig || {});
+    const code = generateAction(
+      action.endpoint,
+      baseUrl,
+      mapper,
+      generator,
+      action.actionConfig || {},
+      triggerConfig
+    );
     const filePath = path.join(actionsDir, `${action.key}.js`);
     const formatted = await formatCode(code, filePath);
     generator.writeFile(filePath, formatted);
@@ -1640,7 +2751,7 @@ async function generate() {
   console.log(`   1. cd ${config.outputDir}`);
   console.log(`   2. npm install`);
   console.log(`   3. npm test`);
-  console.log(`   4. npx zapier-platform-cli push`);
+    console.log(`   4. npx zapier-platform push`);
   console.log(`\n💡 Tip: Use 'npm run generate:clean' to remove generated directory before generation`);
 }
 

@@ -10,21 +10,13 @@ const perform = async (z, bundle) => {
 
   {{queryParamsCode}}
 
-  const response = await z.request({
-    method: '{{method}}',
-    url: url,
-    {{paramsCode}}
-    headers: {
-      Authorization: `Bearer ${bundle.authData.access_token}`,
-      'Content-Type': 'application/json',
-    },
-  });
-
-  let results = {{responseCode}};
+  {{requestCode}}
+  
+  {{sortCode}}
   
   // Filter results if needed (e.g., only unreviewed transactions)
   // Example: results = results.filter(item => item.status === 'unreviewed');
-  {{filterCode}}
+  {{filterCode}}{{labelCode}}
   
   return results;
 };
@@ -34,7 +26,7 @@ module.exports = {
   noun: '{{noun}}',
   display: {
     label: '{{displayLabel}}',
-    description: '{{description}}',
+    description: '{{description}}'{{hiddenProperty}},
   },
   operation: {
     inputFields: [{{inputFieldsCode}}],

@@ -1,15 +1,5 @@
 {
   "actions": {
-    "addPet": {
-      "fieldDefaults": {
-        "status": "available"
-      }
-    },
-    "updatePet": {
-      "fieldDefaults": {
-        "status": "available"
-      }
-    },
     "createUsersWithListInput": {
       "simplify": {
         "enabled": true,
@@ -21,6 +11,77 @@
       },
       "hideRequestBodyProperties": ["password"]
     },
+    "addPet": {
+      "simplify": {
+        "enabled": true,
+        "name": "Create a New Pet",
+        "flattenArray": {
+          "arrayField": "items",
+          "itemSchema": "Item",
+          "publicName": "New Item"
+        },
+        "additionalProperties": ["status"],
+        "responseExtraction": {
+          "arrayProperty": "items",
+          "extractSingle": true
+        }
+      },
+      "fieldDefaults": {
+        "status": "available"
+      },
+      "dynamicFields": {
+        "vet_id": {
+          "sourceTrigger": "getAllVets",
+          "valueField": "id"
+        }
+      }
+    },
+    "updatePet": {
+      "fieldDefaults": {
+        "status": "available"
+      },
+      "dynamicFields": {
+        "vet_id": {
+          "sourceTrigger": "getAllVets",
+          "valueField": "id"
+        }
+      }
+    },
+    "createCategory": {
+      "hideRequestBodyProperties": ["children"],
+      "helperFields": {
+        "child1_id": {
+          "label": "Child Category 1",
+          "type": "number",
+          "helpText": "Optional: Select a category to add as a child when creating a category group.",
+          "dynamicFields": {
+            "sourceTrigger": "getAllCategories",
+            "valueField": "id"
+          },
+          "mapTo": "children"
+        },
+        "child2_id": {
+          "label": "Child Category 2",
+          "type": "number",
+          "helpText": "Optional: Select a second category to add as a child.",
+          "dynamicFields": {
+            "sourceTrigger": "getAllCategories",
+            "valueField": "id"
+          },
+          "mapTo": "children"
+        },
+        "child3_id": {
+          "label": "Child Category 3",
+          "type": "number",
+          "helpText": "Optional: Select a third category to add as a child.",
+          "dynamicFields": {
+            "sourceTrigger": "getAllCategories",
+            "valueField": "id"
+          },
+          "mapTo": "children"
+        }
+      }
+    },
     "createUser": {
       "hideRequestBodyProperties": ["password"]
     },
@@ -29,7 +90,9 @@
     },
     "loginUser": {
       "hideRequestBodyProperties": ["password"]
+    },
+    "deleteItem": {
+      "omit": true
     }
   }
 }
-
