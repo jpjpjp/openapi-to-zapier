@@ -33,6 +33,7 @@ ZAPIER_SCHEMA_URL=https://petstore3.swagger.io/api/v3/openapi.json
 
 # Zapier App ID (from https://developer.zapier.com) - required for pushing to Zapier
 ZAPIER_APP_ID=12345
+
 ```
 
 ### Environment Variable Details
@@ -47,21 +48,36 @@ ZAPIER_APP_ID=12345
 ## How It Works
 
 1. **Schema Parsing**: The generator fetches and parses your OpenAPI schema
+
 2. **Endpoint Extraction**: Identifies all API endpoints and their methods
-3. **Classification**: 
-   - All endpoints become **actions** (available in the Action dropdown)
-   - Endpoints can also be configured as **triggers** (for polling) via config file
-4. **Code Generation**: Generates Zapier-compatible JavaScript files for:
+3. **Classification**. By default:
+
+    - **All endpoints** become **actions** (available in Action dropdown)
+    - **All query params and/or response body properties** are exposed in the generated zap
+    - **The entire response object** is returned
+   - This behavior can be overridden via custom configuration. 
+  
+    See [Action Configuration](#action-configuration) 
+
+4. An endpoint can be both a trigger AND an action:
+   - **As a trigger**: Used to start a Zap (polling) 
+   - **As an action**: Used as a step in a Zap (on-demand execution)
+   
+   See [Trigger Configuration](#trigger-configuration)
+
+   
+5. **Code Generation**: Generates Zapier-compatible JavaScript files for:
    - Actions (in `actions/` directory)
    - Triggers (in `triggers/` directory)
    - Authentication configuration
    - Main integration file (`index.js`)
    - Package configuration
-5. **Output**: All generated files are placed in the `generated/` directory
+6. **Output**: All generated files are placed in the `generated/` directory
 
 ## Configuration
 
 ### Authentication Configuration
+APIs that require authentication, must configure an endpoint to use for authentication.
 
 To configure authentication settings, create an `authentication-config.json` file in the project root. See `authentication-config-example.json` for a template.
 
@@ -94,28 +110,109 @@ To configure authentication settings, create an `authentication-config.json` fil
   - **`type: "string"`**: Static label (e.g., `"Petstore Account"`, `"API Account"`)
   - **`type: "function"`**: Dynamic label using a function (e.g., `"bundle.authData.email || 'API Account'"`). The function receives the authentication test response and can extract user information.
 
-### Trigger Configuration -- Polling
+### Trigger Configuration
+The generator does not configure any triggers by default.
+To configure triggers, create a`triggers-config.json` file in the project root. See `triggers-config-example.json` for a template.
 
-To create triggers (polling endpoints), create a `triggers-config.json` file in the project root. See `triggers-config-example.json` for a template.
+Triggers can be made available as zaps (for example a polling trigger).
 
-**Example using Petstore API:**
+You can also configure hidden triggers that don't appear in the Zapier UI but are used internally to power dynamic dropdowns. They fetch data from GET endpoints and format it for use in action input fields.
+
+
+#### Trigger Configuration Fields
+
+- **Trigger Key** (JSON object key): A unique identifier for the trigger. This is used as the trigger's `key` in the generated code and when referencing the trigger in `dynamicFields` configuration.
+- **`endpoint`**: **Required.** The API endpoint path (e.g., `/pets`, `/items`). This specifies which endpoint the trigger will use.
+- **`name`**: **Optional, only useful for visible triggers.** Display name for the trigger in Zapier (used in the action/trigger dropdown). This is only used for display purposes and is not needed for hidden triggers (triggers with `hidden: true`).
+- **`title`**: **Required for visible triggers.** Description text that appears in Zapier UI. Must start with "Triggers when " to comply with Zapier's requirements (D021). This is used as the trigger's description. Not required for hidden triggers (used for dynamic dropdowns).
+- **`arrayProperty`**: **Optional.** Specifies which property in the API response contains the array of items to process. If omitted, the generator will automatically detect the array property:
+  - **Single array property**: If the response has exactly one property that is an array (e.g., `{ items: [...] }` or `{ data: [...] }`), it will be automatically detected. No configuration needed for endpoints that return a single array property.
+  - **Multiple properties**: If the response has multiple properties (e.g., `{ items: [...], has_more: true }` or `{ data: [...], pagination: {...} }`), you should explicitly specify `arrayProperty` to avoid ambiguity. Example: `"arrayProperty": "items"` tells the trigger to use `response.json.items` as the array of items.
+- **`queryParams`**: Optional object of query parameters to automatically include in the API request. These parameters are set automatically and won't appear as input fields. Useful for server-side filtering to make API calls more efficient. Example: `{"status": "available"}` will always include `?status=available` in the request.
+
+- **`filters`**: Optional object for simple property-based client-side filtering. Specifies property-value pairs to filter results after the API response is received. Only items matching all specified filters will be included. Example: `{"archived": false, "status": "active"}` filters for items where `archived` is `false` AND `status` is `"active"`. This is applied automatically in the generated trigger code.
+
+  **Important**: For hidden triggers used in dynamic dropdowns, prefer using `queryParams` for server-side filtering when your API supports it. Only use `filters` when query parameters aren't available or for additional client-side filtering that can't be done server-side.
+
+- **`filterCode`**: Optional JavaScript code string for custom client-side filtering. The code is inserted directly into the generated trigger and runs on the array of results returned from the API. Use this for complex filtering logic that can't be expressed with simple property-value pairs. The code should modify the `results` array. Example: `"filterCode": "const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);\nresults = results.filter(item => new Date(item.created_at) > oneDayAgo);"`
+
+  **When to use `filterCode` vs `filters`** 
+  - Use `filters` (plural) for simple property-value matching (e.g., `{"archived": false}`)
+  - Use `filterCode` for complex JavaScript logic (e.g., date comparisons, computed values, OR conditions)
+
+- **`hidden`**: Optional boolean. If set to `true`, the trigger will be hidden from the Zapier UI and can only be used internally for dynamic dropdowns. See [Dynamic Dropdowns](#dynamic-dropdowns) section below.
+
+- **`label`**: Optional object for hidden triggers. Configures how items are displayed in dynamic dropdowns. See [Label Templates](#label-templates) section below.
+
+#### Query Parameters vs Filtering
+
+**Query Parameters (`queryParams`)**: Use for server-side filtering. These are sent to the API and reduce the amount of data returned, making the trigger more efficient. Parameters specified here are automatically included in every API request and won't appear as user input fields.
+
+**For Hidden Triggers**: When creating hidden triggers for dynamic dropdowns, prefer `queryParams` over `filters` whenever your API supports the filtering via query parameters. This is especially important for dynamic dropdowns since they're called frequently and efficiency matters.
+
+**Filter Code (`filterCode`)**: Use for complex client-side filtering with custom JavaScript code. This is useful when:
+- You need complex filtering logic that the API doesn't support
+- You want to combine multiple conditions with OR logic
+- You need to filter based on computed values or date comparisons
+- You need custom logic that can't be expressed as simple property-value pairs
+
+**Example:**
+```json
+"filterCode": "const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);\nresults = results.filter(item => new Date(item.created_at) > oneDayAgo);"
+```
+
+**Filters (`filters`)**: Use for simple property-based client-side filtering. This is an object with property-value pairs that gets automatically converted to filter code. Use this when:
+- You need simple AND conditions (all properties must match)
+- The filtering can be expressed as property-value pairs
+- You want a cleaner, more declarative configuration
+
+**Example:**
+```json
+"filters": {
+  "archived": false,
+  "status": "active"
+}
+```
+
+**Best Practice**: 
+1. Check your API documentation for available query parameters
+2. Use `queryParams` for simple server-side filtering (like `status: "available"`, `is_group: false`, `archived: false`)
+3. Use `filters` (plural) for simple client-side property-based filtering
+4. Use `filterCode` (JavaScript code) only for complex client-side filtering logic that can't be expressed with `filters`
+
+#### Filter Examples
+
+```javascript
+// Filter by status (client-side backup)
+"filterCode": "results = results.filter(item => item.status === 'available');"
+
+// Filter for items created in the last 24 hours
+"filterCode": "const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);\nresults = results.filter(item => new Date(item.created_at) > oneDayAgo);"
+
+// Filter by specific property value
+"filterCode": "results = results.filter(item => item.status === 'active');"
+```
+
+**Note**: The `filter` logic receives a `results` variable containing the array of items from the API response. Modify this array to control which items trigger your Zap.
+
+**Example Polling Trigger using Petstore API:**
 
 ```json
 {
   "triggers": {
-    "/pet/findByStatus": {
+    "pollAvailablePets": {
+      "endpoint": "/pet/findByStatus",
       "name": "Poll for Available Pets",
-      "key": "pollAvailablePets",
       "title": "Triggers when new available pets are found",
       "arrayProperty": "pets",
       "queryParams": {
         "status": "available"
       },
-      "filter": "// Optional: Add custom filtering logic here if needed"
+      "filterCode": "// Optional: Add custom filtering logic here if needed"
     },
-    "/pets": {
+    "pollPets": {
+      "endpoint": "/pets",
       "name": "Poll for New Pets",
-      "key": "pollPets",
       "title": "Triggers when new pets are found"
       // arrayProperty not needed - will auto-detect "pets" from single-property response
     }
@@ -123,43 +220,118 @@ To create triggers (polling endpoints), create a `triggers-config.json` file in 
 }
 ```
 
-#### Trigger Configuration Fields
+#### Hidden Triggers for Dynamic Dropdowns
 
-- **Path** (key): The API endpoint path (e.g., `/pets`, `/items`)
-- **`name`**: Display name for the trigger in Zapier (used in the action/trigger dropdown)
-- **`key`**: Unique identifier for the trigger (used in code)
-- **`title`**: **Required.** Description text that appears in Zapier UI. Must start with "Triggers when " to comply with Zapier's requirements (D021). This is used as the trigger's description.
-- **`arrayProperty`**: **Optional.** Specifies which property in the API response contains the array of items to process. If omitted, the generator will automatically detect the array property:
-  - **Single array property**: If the response has exactly one property that is an array (e.g., `{ items: [...] }` or `{ data: [...] }`), it will be automatically detected. No configuration needed for endpoints that return a single array property.
-  - **Multiple properties**: If the response has multiple properties (e.g., `{ items: [...], has_more: true }` or `{ data: [...], pagination: {...} }`), you should explicitly specify `arrayProperty` to avoid ambiguity. Example: `"arrayProperty": "items"` tells the trigger to use `response.json.items` as the array of items.
-- **`queryParams`**: Optional object of query parameters to automatically include in the API request. These parameters are set automatically and won't appear as input fields. Useful for server-side filtering to make API calls more efficient. Example: `{"status": "available"}` will always include `?status=available` in the request.
-- **`filter`**: Optional JavaScript code to filter results before triggering. This code runs on the array of results returned from the API. Use this for client-side filtering when server-side filtering via `queryParams` isn't sufficient.
+Hidden triggers are special triggers that don't appear in the Zapier UI but are used internally to power dynamic dropdowns. They fetch data from GET endpoints and format it for use in action input fields.
 
-#### Query Parameters vs Filtering
+**Example:**
 
-**Query Parameters (`queryParams`)**: Use for server-side filtering. These are sent to the API and reduce the amount of data returned, making the trigger more efficient. Parameters specified here are automatically included in every API request and won't appear as user input fields.
-
-**Filter (`filter`)**: Use for client-side filtering after the API response is received. This is useful when:
-- You need complex filtering logic that the API doesn't support
-- You want to combine multiple conditions
-- You need to filter based on computed values
-
-**Best Practice**: Use `queryParams` for simple server-side filtering (like `status: "available"`), and `filter` for additional client-side filtering if needed.
-
-#### Filter Examples
-
-```javascript
-// Filter by status (client-side backup)
-"filter": "results = results.filter(item => item.status === 'available');"
-
-// Filter for items created in the last 24 hours
-"filter": "const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);\nresults = results.filter(item => new Date(item.created_at) > oneDayAgo);"
-
-// Filter by specific property value
-"filter": "results = results.filter(item => item.status === 'active');"
+```json
+{
+  "triggers": {
+    "getAllCategories": {
+      "endpoint": "/categories",
+      "hidden": true,
+      "queryParams": {
+        "is_group": false,
+        "archived": false
+      },
+      "label": {
+        "template": "${name} (ID: ${id})",
+        "fallback": "${name}"
+      }
+    },
+    "getAllCategoryGroups": {
+      "endpoint": "/categories",
+      "hidden": true,
+      "queryParams": {
+        "is_group": true,
+        "archived": false
+      },
+      "label": {
+        "template": "${name} (Group ID: ${id})",
+        "fallback": "${name}"
+      }
+    }
+  }
+}
 ```
 
-**Note**: The `filter` code receives a `results` variable containing the array of items from the API response. Modify this array to control which items trigger your Zap.
+This configuration:
+- Creates two hidden triggers that both fetch from `/categories` but with different filters
+- `getAllCategories` uses server-side filtering via `queryParams` to only fetch non-group, non-archived categories
+- `getAllCategoryGroups` fetches only category groups (where `is_group` is `true`)
+- Both format each item's label using the template (e.g., "Groceries (ID: 123)")
+- Falls back to just the name if the template evaluates to empty
+
+**When to use `queryParams` vs `filters` for hidden triggers:**
+
+- **`queryParams`** (Recommended): Use when your API supports query parameters for filtering. This is more efficient because:
+  - Filtering happens on the server, reducing data transfer
+  - Faster response times (less data to process)
+  - Better performance for large datasets
+  
+  Check your API documentation to see what query parameters are available. Common examples: `is_group`, `archived`, `status`, `active`, etc.
+
+- **`filters`**: Use only when:
+  - The API doesn't support query parameters for the filtering you need
+  - You need to filter based on computed values or complex logic
+  - You need to combine multiple conditions that can't be expressed as query params
+
+**Best Practice**: Always check your API documentation first to see if query parameters are available. Use `queryParams` for server-side filtering whenever possible, and only fall back to `filters` for client-side filtering when necessary.
+
+#### Label Templates
+
+Label templates control how items are displayed in dynamic dropdowns. They support:
+
+- **Simple property access**: `${name}`, `${id}`, `${title}`
+- **Nested property access**: `${user.name}`, `${metadata.created_at}`
+- **Template literals**: Combine multiple properties: `${name} - ${id}`
+- **Complex expressions**: Use JavaScript expressions with fallbacks: `${description || \`Item ${id}\`}`
+
+**Template Syntax:**
+
+```json
+{
+  "label": {
+    "template": "${property1} - ${property2}",
+    "fallback": "${property3 || 'Default Label'}"
+  }
+}
+```
+
+- **`template`**: Primary template for the label. If this evaluates to a non-empty string, it's used.
+- **`fallback`**: Fallback template used when the main template is empty. Supports nested template literals for complex expressions.
+
+**Examples:**
+
+```json
+// Simple: Display name and ID
+{
+  "label": {
+    "template": "${name} (ID: ${id})",
+    "fallback": "${name}"
+  }
+}
+
+// Nested properties: Access nested object properties
+{
+  "label": {
+    "template": "${user.first_name} ${user.last_name}",
+    "fallback": "${user.email}"
+  }
+}
+
+// Complex: Multiple properties with fallback
+{
+  "label": {
+    "template": "${title} - ${amount} - ${date}",
+    "fallback": "${description || \`Item ${id}\`}"
+  }
+}
+```
+
+**Note**: When using nested template literals in the fallback, write and escape your expression so it will be parsed properly as JSON (e.g., `` `\`Item ${id}\`` ``).
 
 ### Trigger Configuration -- Webhooks
 
@@ -172,9 +344,10 @@ To customize how actions are generated, create an `actions-config.json` file in 
 - Omit endpoints from generation
 - Hide specific query parameters or request body properties
 - Set default values for fields
-- Conditionally show/hide fields based on other field values
 - Simplify complex endpoints (e.g., convert array inputs to single object inputs)
 - Control duplicate detection for endpoints that return `skipped_duplicates` arrays
+- Configure dynamic dropdowns for ID fields
+- Extract single items from array responses
 
 **Example Configuration (using Petstore API):**
 
@@ -212,10 +385,6 @@ To customize how actions are generated, create an `actions-config.json` file in 
 
 - **`fieldDefaults`**: Optional object. Key-value pairs where keys are field names and values are default values to set. Example: `{"is_group": false}` sets the `is_group` field to `false` by default.
 
-- **`conditionalFields`**: Optional array of conditional field configurations. Each entry specifies a field that should be conditionally shown/hidden based on other field values.
-  - **`field`**: The name of the field to conditionally show/hide
-  - **`hideWhen`**: Object specifying conditions. The field will be hidden when all conditions are met. Example: `{"is_group": true}` hides the field when `is_group` is `true`.
-
 - **`simplify`**: Optional object for simplifying complex endpoints. Useful for creating a simple "Create" Action that calls an API that accepts and array of complex items to insert.
   - **`enabled`**: Boolean to enable simplification
   - **`name`**: Optional custom display name for the simplified action
@@ -224,25 +393,12 @@ To customize how actions are generated, create an `actions-config.json` file in 
     - **`itemSchema`**: Name of the schema that defines the array item structure (e.g., `"User"` or `"Pet"`)
     - **`publicName`**: Optional string. If provided, creates a nested object field with this name containing all the array item fields as children. The additional properties will appear as top-level siblings. Example: `"publicName": "New Transaction"` creates a "New Transaction" object containing all transaction fields, with additional properties like `apply_rules` as siblings.
   - **`additionalProperties`**: Optional array of property names from the request body schema to include as input fields (in addition to the flattened array item fields). Useful for properties like `apply_rules`, `skip_duplicates`, etc.
+  - **`responseExtraction`**: Optional object for extracting a single item from array responses. Useful when an action returns an array but you want to return just the first item.
+    - **`arrayProperty`**: The property in the response that contains the array (e.g., `"items"`, `"results"`)
+    - **`extractSingle`**: Boolean. If `true`, extracts the first item from the array instead of returning the full response object.
+- **`dynamicFields`**: Optional object for configuring dynamic dropdowns. Maps field names to their dynamic dropdown configuration. See [Dynamic Dropdowns](#dynamic-dropdowns) section below. This can be used with or without `simplify`.
 
-#### Conditional Fields Example
-
-The `conditionalFields` feature allows you to hide fields based on other field values. **Note:** This feature is currently disabled due to Zapier validation limitations, but the configuration structure is preserved for future use.
-
-```json
-{
-  "conditionalFields": [
-    {
-      "field": "group_id",
-      "hideWhen": {
-        "is_group": true
-      }
-    }
-  ]
-}
-```
-
-This would hide `group_id` when `is_group` is set to `true`.
+- **`helperFields`**: Optional object for creating UI-only helper fields that map to API properties. Useful for replacing complex array fields with multiple dropdown fields. See [Helper Fields](#helper-fields) section below.
 
 #### Array Simplification Example
 
@@ -294,6 +450,271 @@ This configuration:
 - Displays `apply_rules`, `skip_duplicates`, and `skip_balance_update` as top-level siblings to "New Transaction"
 - Provides a cleaner, more organized UI structure in Zapier
 
+#### Dynamic Dropdowns
+
+Dynamic dropdowns allow users to select values from a list fetched from your API, rather than typing IDs manually. This requires:
+
+1. **Hidden Trigger**: A hidden trigger in `triggers-config.json` that fetches the list of options
+2. **Action Configuration**: Reference to that trigger in `actions-config.json` via `dynamicFields`
+
+**Step 1: Create Hidden Trigger**
+
+In `triggers-config.json`, create a hidden trigger that fetches your options. Use `queryParams` for server-side filtering when your API supports it:
+
+```json
+{
+  "triggers": {
+    "getAllCategories": {
+      "endpoint": "/categories",
+      "hidden": true,
+      "queryParams": {
+        "is_group": false,
+        "archived": false
+      },
+      "label": {
+        "template": "${name} (ID: ${id})",
+        "fallback": "${name}"
+      }
+    }
+  }
+}
+```
+
+**Note**: Check your API documentation to see what query parameters are available. If the API doesn't support query parameters for your filtering needs, you can use `filters` instead for client-side filtering.
+
+**Step 2: Configure Dynamic Field in Action**
+
+In `actions-config.json`, reference the hidden trigger for the field:
+
+```json
+{
+  "actions": {
+    "createItem": {
+      "dynamicFields": {
+        "category_id": {
+          "sourceTrigger": "getAllCategories",
+          "valueField": "id"
+        }
+      }
+    }
+  }
+}
+```
+
+This configuration:
+- Makes `category_id` a dynamic dropdown field
+- Fetches options from the `getAllCategories` hidden trigger
+- Uses the `id` property as the value sent to the API
+- Displays items using the label template from the trigger config
+
+**Dynamic Fields Configuration:**
+
+- **Field name** (key): The name of the input field in your action (e.g., `"category_id"`, `"account_id"`)
+- **`sourceTrigger`**: The `key` of the hidden trigger that provides the options (must match the trigger's `key` in `triggers-config.json`)
+- **`valueField`**: The property from the trigger results to use as the value (typically `"id"`)
+
+**Supported Field Types:**
+
+Dynamic dropdowns work with:
+- Top-level fields in the action
+- Nested fields within objects (e.g., `new_item.category_id`)
+- Numeric ID fields (automatically converted to numbers)
+- String ID fields
+
+**Example: Multiple Dynamic Fields**
+
+```json
+{
+  "actions": {
+    "createTransaction": {
+      "dynamicFields": {
+        "category_id": {
+          "sourceTrigger": "getAllCategories",
+          "valueField": "id"
+        },
+        "account_id": {
+          "sourceTrigger": "getAllAccounts",
+          "valueField": "id"
+        },
+        "tag_ids": {
+          "sourceTrigger": "getAllTags",
+          "valueField": "id"
+        }
+      }
+    }
+  }
+}
+```
+
+**Note**: For multi-select fields (arrays), use comma-separated input. The generator automatically converts comma-separated strings to arrays of numbers.
+
+#### Helper Fields
+
+Helper fields allow you to create UI-only fields that provide a better user experience than raw array properties. Instead of requiring users to enter comma-separated IDs, you can provide multiple dropdown fields that automatically merge into the target API property.
+
+**Use Cases:**
+- Replace array fields (like `children`, `tag_ids`) with multiple individual dropdown fields
+- Provide a more intuitive interface for selecting multiple items
+- Hide complex array properties while offering simpler alternatives
+
+**Configuration:**
+
+```json
+{
+  "actions": {
+    "createCategory": {
+      "hideRequestBodyProperties": ["children"],
+      "helperFields": {
+        "child1_id": {
+          "label": "Child Category 1",
+          "type": "number",
+          "helpText": "Optional: Select a category to add as a child when creating a category group.",
+          "dynamicFields": {
+            "sourceTrigger": "getAllCategories",
+            "valueField": "id"
+          },
+          "mapTo": "children"
+        },
+        "child2_id": {
+          "label": "Child Category 2",
+          "type": "number",
+          "helpText": "Optional: Select a second category to add as a child.",
+          "dynamicFields": {
+            "sourceTrigger": "getAllCategories",
+            "valueField": "id"
+          },
+          "mapTo": "children"
+        },
+        "child3_id": {
+          "label": "Child Category 3",
+          "type": "number",
+          "helpText": "Optional: Select a third category to add as a child.",
+          "dynamicFields": {
+            "sourceTrigger": "getAllCategories",
+            "valueField": "id"
+          },
+          "mapTo": "children"
+        }
+      }
+    }
+  }
+}
+```
+
+**Helper Fields Configuration:**
+- **Field name** (key): The name of the helper field (e.g., `"child1_id"`, `"tag1_id"`)
+- **`label`**: Display label for the field in Zapier UI
+- **`type`**: Field type (typically `"number"` for ID fields)
+- **`helpText`**: Help text shown to users in the Zapier UI
+- **`dynamicFields`**: Optional dynamic dropdown configuration (same structure as top-level `dynamicFields`)
+  - **`sourceTrigger`**: The trigger key that provides the dropdown options
+  - **`valueField`**: The property from trigger results to use as the value (typically `"id"`)
+- **`mapTo`**: **Required.** The API property name this helper field maps to (e.g., `"children"`, `"tag_ids"`)
+
+**How It Works:**
+1. Helper fields appear as separate input fields in the Zapier UI
+2. Each helper field can have its own dynamic dropdown
+3. Values from all helper fields that map to the same property are automatically merged
+4. The merged values are combined with any existing values from the original property (if not hidden)
+5. Duplicates are automatically removed
+6. The final merged array is sent to the API in the target property
+
+**Example: Multiple Helper Fields Mapping to Same Property**
+
+```json
+{
+  "actions": {
+    "updateTransaction": {
+      "hideRequestBodyProperties": ["additional_tag_ids"],
+      "helperFields": {
+        "additional_tag1_id": {
+          "label": "Additional Tag 1",
+          "type": "number",
+          "helpText": "Optional: Select a tag to add to the transaction.",
+          "dynamicFields": {
+            "sourceTrigger": "getAllTags",
+            "valueField": "id"
+          },
+          "mapTo": "additional_tag_ids"
+        },
+        "additional_tag2_id": {
+          "label": "Additional Tag 2",
+          "type": "number",
+          "helpText": "Optional: Select a second tag to add to the transaction.",
+          "dynamicFields": {
+            "sourceTrigger": "getAllTags",
+            "valueField": "id"
+          },
+          "mapTo": "additional_tag_ids"
+        },
+        "additional_tag3_id": {
+          "label": "Additional Tag 3",
+          "type": "number",
+          "helpText": "Optional: Select a third tag to add to the transaction.",
+          "dynamicFields": {
+            "sourceTrigger": "getAllTags",
+            "valueField": "id"
+          },
+          "mapTo": "additional_tag_ids"
+        }
+      }
+    }
+  }
+}
+```
+
+This configuration:
+- Hides the `additional_tag_ids` array property
+- Provides three dropdown fields (`additional_tag1_id`, `additional_tag2_id`, `additional_tag3_id`)
+- Automatically merges all selected tag IDs into the `additional_tag_ids` array
+- Works with simplified actions (nested objects) as well as regular actions
+
+**Best Practice**: Use `hideRequestBodyProperties` to hide the original array property when using helper fields, providing a cleaner user experience.
+
+## Authentication
+
+The generator creates custom API key authentication based on your `authentication-config.json` file. By default, it uses:
+- Bearer token in `Authorization` header
+- Configurable field key (default: `access_token`)
+- Configurable test endpoint for authentication validation
+- Configurable connection label (static string or dynamic function)
+
+### Response Handling
+
+#### Response Extraction
+
+By default all properties in the response objects (e.g., an `items` array and a `has_more` boolean, are exposed to the zap user.  
+
+By default, Zapier converts arrays of objects into [Line items](https://help.zapier.com/hc/en-us/articles/8496275165709-Create-line-items-in-Zaps#h_01JAFJE6KV6AKW36BQ63YJ40W3)
+
+When an action returns an array but you want to return just a single item, use `responseExtraction`:
+
+```json
+{
+  "actions": {
+    "createItem": {
+      "simplify": {
+        "enabled": true,
+        "name": "Create a New Item",
+        "flattenArray": {
+          "arrayField": "items",
+          "itemSchema": "Item"
+        },
+        "responseExtraction": {
+          "arrayProperty": "items",
+          "extractSingle": true
+        }
+      }
+    }
+  }
+}
+```
+
+This configuration:
+- Extracts the first item from the `items` array in the response
+- Returns that single item instead of the full response object
+- Makes the action output easier to use in subsequent Zap steps
+
 **Note**: Endpoints not listed in the config file are generated using default behavior from the OpenAPI schema.
 
 ## Usage
@@ -309,7 +730,23 @@ npm run generate:clean
 
 # Update schema cache and regenerate
 npm run generate -- --update-cache
+
+# Override version number (useful when OpenAPI spec doesn't include version or you want a different version)
+npm run generate -- --version 1.2.3
+
+# Combine options
+npm run generate -- --update-cache --version 2.0.0
 ```
+
+#### Generation Options
+
+- **`--update-cache`**: Forces the generator to fetch a fresh copy of the OpenAPI schema, ignoring any cached version.
+- **`--version <version>`**: Overrides the version number extracted from the OpenAPI spec. Useful when:
+  - The OpenAPI spec doesn't include a version
+  - You want to use a different version number than what's in the spec
+  - You need to follow semantic versioning (MAJOR.MINOR.PATCH) for Zapier
+- **`--clean`**: Removes the `generated/` directory before generating (same as `npm run generate:clean`).
+- **`--schema-url <url>`**: Overrides the schema URL from environment variables for this run only.
 
 ### Work with Generated Integration
 
@@ -328,6 +765,14 @@ npm run zapier:push
 
 # Login to Zapier
 npm run zapier:login
+
+# Delete a version (requires version number as argument)
+# Note: You cannot delete a version if there are active users or live Zaps using it.
+# You may need to deprecate it first. See: https://docs.zapier.com/platform/manage/deprecate
+npm run zapier:version:delete -- 1.0.27
+
+# List all versions
+npm run zapier:versions
 
 # Manage users
 npm run zapier:users:invite
@@ -365,76 +810,6 @@ npm run zapier:users:links
 │   └── package.json              # Zapier package config
 └── schema-cache/                 # Cached OpenAPI schemas (not in git)
 ```
-
-## How Triggers Work
-
-Triggers in Zapier are used to start workflows (Zaps) when certain conditions are met. They work by:
-
-1. **Polling**: Zapier automatically polls your trigger endpoint periodically (every 1-15 minutes)
-2. **Filtering**: Your custom filter code runs on the results to determine which items should trigger
-3. **Deduplication**: Zapier tracks which items it has already seen and only triggers for new items
-4. **Execution**: When new matching items are found, your Zap runs with that item as input
-
-### Example: Petstore API Trigger
-
-```json
-{
-  "triggers": {
-    "/pet/findByStatus": {
-      "name": "Poll for Available Pets",
-      "key": "pollAvailablePets",
-      "title": "Triggers when new available pets are found",
-      "queryParams": {
-        "status": "available"
-      },
-      "filter": "// Optional: Add custom filtering logic here if needed"
-    }
-  }
-}
-```
-
-This configuration:
-- Polls the `/pet/findByStatus` endpoint
-- Automatically includes `?status=available` in the API request (server-side filtering)
-- Has a properly formatted title that starts with "Triggers when "
-- Triggers your Zap whenever new available pets are found
-
-**Note**: The `queryParams` makes the API call more efficient by filtering server-side, while the `filter` provides an optional client-side check for additional filtering logic.
-
-## Endpoint Classification
-
-By default:
-- **All endpoints** become **actions** (available in Action dropdown)
-- **GET endpoints that return arrays** can be auto-detected as triggers
-- **Endpoints in trigger config** become triggers in addition to being actions
-
-An endpoint can be both a trigger AND an action:
-- **As a trigger**: Used to start a Zap (polling)
-- **As an action**: Used as a step in a Zap (on-demand execution)
-
-## Schema Mapping
-
-The generator automatically maps OpenAPI types to Zapier field types:
-
-- `string` → `string`
-- `integer` / `number` → `number`
-- `boolean` → `boolean`
-- `date` / `date-time` → `datetime`
-- `array` → Handled appropriately (wrapped in objects for actions)
-- `object` → Preserved as object structure
-- `enum` → Field with choices (currently disabled due to validation issues)
-
-## Authentication
-
-The generator creates custom API key authentication based on your `authentication-config.json` file. By default, it uses:
-- Bearer token in `Authorization` header
-- Configurable field key (default: `access_token`)
-- Configurable test endpoint for authentication validation
-- Configurable connection label (static string or dynamic function)
-
-### Response Handling
-
-For endpoints that return responses with both a main array (e.g., `transactions`) and a `skipped_duplicates` array, the full response object is returned by default. This preserves all properties, allowing users to see both successfully created items and any duplicates that were skipped.
 
 ## Troubleshooting
 

@@ -1,21 +1,70 @@
 {
   "triggers": {
-            "/pet/findByStatus": {
-              "name": "Poll for Available Pets",
-              "key": "pollAvailablePets",
-              "title": "Triggers when new available pets are found",
-              "arrayProperty": "pets",
-              "queryParams": {
-                "status": "available"
-              },
-              "filter": "// Optional: Add custom filtering logic here if needed"
-            },
-    "/pet/findByTags": {
+    "pollAvailablePets": {
+      "endpoint": "/pet/findByStatus",
+      "name": "Poll for Available Pets",
+      "title": "Triggers when new available pets are found",
+      "arrayProperty": "pets",
+      "queryParams": {
+        "status": "available"
+      }
+    },
+    "pollPetsByTags": {
+      "endpoint": "/pet/findByTags",
       "name": "Poll for Pets by Tags",
-      "key": "pollPetsByTags",
       "title": "Triggers when pets matching specified tags are found",
-      "filter": "// Optional: Add custom filtering logic here if needed"
+      "filterCode": "// Optional: Add custom filtering logic here if needed\n// Example: results = results.filter(item => item.status === 'available');"
+    },
+    "pollRecentItems": {
+      "endpoint": "/items",
+      "name": "Poll for Recent Items",
+      "title": "Triggers when new items are found",
+      "queryParams": {
+        "status": "active"
+      },
+      "filterCode": "const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);\nresults = results.filter(item => new Date(item.created_at) > oneDayAgo);"
+    },
+    "getAllVets": {
+      "endpoint": "/vets",
+      "hidden": true,
+      "queryParams": {
+        "accepting_patients": true
+      },
+      "filters": {
+        "retired": false
+      },
+      "label": {
+        "template": "${name} (ID: ${id})",
+        "fallback": "${name}"
+      }
+    },
+    "getAllCategories": {
+      "endpoint": "/categories",
+      "hidden": true,
+      "queryParams": {
+        "is_group": false
+      },
+      "filters": {
+        "archived": false
+      },
+      "label": {
+        "template": "${name} (ID: ${id})",
+        "fallback": "${name}"
+      }
+    },
+    "getAllCategoryGroups": {
+      "endpoint": "/categories",
+      "hidden": true,
+      "queryParams": {
+        "is_group": true
+      },
+      "filters": {
+        "archived": false
+      },
+      "label": {
+        "template": "${name} (ID: ${id})",
+        "fallback": "${name}"
+      }
     }
   }
 }
-
