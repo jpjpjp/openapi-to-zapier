@@ -332,5 +332,6 @@ zapier-integration/ (generated output)
 
 ### Known Issues
 
-- ❌ **Conditional Fields**: Configuration exists but feature is disabled due to Zapier validation limitations (see TODO.md)
+None currently.
+
 

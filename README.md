@@ -23,9 +23,37 @@ This generator reads an OpenAPI schema (from a URL or local file) and automatica
 npm install
 ```
 
+## API-Specific Configuration
+
+This generator is designed to work with any OpenAPI specification. To keep API-specific configuration, tests, and environment variables separate from the generic generator, you can use a Git submodule named `api-config`.
+
+For more details see [Working with an API Config Submodule](#working-with-an-api-config-submodule)
+
+If using an api-config submodule, make sure to initialize it as part of your initial setup:
+
+   **Basic setup** (tracks default branch):
+   ```bash
+   git submodule add <your-repo-url> api-config
+   ```
+   
+   **Track a specific branch** (recommended for active development):
+   ```bash
+   git submodule add -b <branch-name> <your-repo-url> api-config
+   ```
+### Working Without a Submodule
+
+If you prefer not to use a submodule, you can create config files directly in the project root:
+- `actions-config.json`
+- `triggers-config.json`
+- `authentication-config.json`
+- `.env`
+
+See the `*-config-example.json` files for templates.
+
+
 ## Environment Variables
 
-Create a `.env` file in the project root with the following variables:
+Create a `.env` file in the project root with the following variables (or use the template provided when initializing an api-config submodule):
 
 ```env
 # OpenAPI schema URL or path (defaults to Petstore example if not set)
@@ -719,6 +747,16 @@ This configuration:
 
 ## Usage
 
+### Setup
+
+```bash
+# Install dependencies and set up API config (if using submodule)
+npm run setup
+
+# Or just set up config files from submodule
+npm run setup-api-config
+```
+
 ### Generate Integration
 
 ```bash
@@ -784,15 +822,21 @@ npm run zapier:users:links
 
 ```
 .
-├── .env                          # Environment variables (not in git)
-├── triggers-config.json          # Trigger configuration (not in git, use example as template)
-├── actions-config.json           # Action configuration (not in git, use example as template)
-├── authentication-config.json    # Authentication configuration (not in git, use example as template)
+├── .env                          # Environment variables (symlinked from api-config/ if using submodule)
+├── triggers-config.json          # Trigger configuration (symlinked from api-config/config/ if using submodule)
+├── actions-config.json           # Action configuration (symlinked from api-config/config/ if using submodule)
+├── authentication-config.json    # Authentication configuration (symlinked from api-config/config/ if using submodule)
 ├── triggers-config-example.json  # Example trigger configuration
 ├── actions-config-example.json   # Example action configuration
 ├── authentication-config-example.json  # Example authentication configuration
+├── api-config/                   # Git submodule (optional) - contains API-specific configs and tests
+│   ├── config/                   # API-specific configuration files
+│   ├── test/                     # API-specific test files
+│   └── .env                      # API-specific environment variables
 ├── scripts/
 │   ├── generate_zapier_from_openapi.js  # Main generator script
+│   ├── setup-api-config.js       # Script to set up config symlinks from submodule
+│   ├── ensure-test-symlink.js    # Script to ensure test symlink exists
 │   ├── templates/                # Code generation templates
 │   │   ├── action.template.js
 │   │   ├── trigger.template.js
@@ -805,11 +849,137 @@ npm run zapier:users:links
 ├── generated/                    # Generated Zapier integration (not in git)
 │   ├── actions/                  # Generated action files
 │   ├── triggers/                 # Generated trigger files
+│   ├── test/                     # Symlink to api-config/test/ (if using submodule)
 │   ├── index.js                  # Main integration file
 │   ├── authentication.js         # Authentication config
 │   └── package.json              # Zapier package config
 └── schema-cache/                 # Cached OpenAPI schemas (not in git)
 ```
+
+
+## Working with an api-config submodule
+If you use this tool to generate zaps for your API, you may wish to setup a github repo that contains the configurations and tests that are specific to your api.
+
+### Setting Up an API Config Submodule
+
+1. **Create a separate repository** for your API-specific configuration:
+   - Create a new GitHub repository (e.g., `my-api-zapier-config`)
+   - This repository will contain your API-specific configs and tests
+
+2. **Structure your submodule repository** as follows:
+   ```
+   api-config/
+   ├── config/
+   │   ├── actions-config.json
+   │   ├── triggers-config.json
+   │   └── authentication-config.json
+   ├── test/
+   │   ├── actions/
+   │   │   ├── createCategory.js
+   │   │   └── ... (other test files)
+   │   └── triggers/
+   │       └── pollUnreviewedTransactions.js
+   └── .env
+   ```
+
+3. **Add the submodule to this project**:
+   
+   **Basic setup** (tracks default branch):
+   ```bash
+   git submodule add <your-repo-url> api-config
+   ```
+   
+   **Track a specific branch** (recommended for active development):
+   ```bash
+   git submodule add -b <branch-name> <your-repo-url> api-config
+   ```
+   
+   For example, to track the `main` branch:
+   ```bash
+   git submodule add -b main https://github.com/your-org/your-repo-name.git api-config
+   ```
+   
+   **Important**: Always specify `api-config` as the target directory name, regardless of your repository's name. This ensures the setup scripts can find your configuration files in the expected location.
+   
+   **Note**: If you've already added the submodule without specifying a branch, you can configure it to track a branch later:
+   ```bash
+   cd api-config
+   git checkout <branch-name>
+   cd ..
+   git config -f .gitmodules submodule.api-config.branch <branch-name>
+   ```
+
+4. **Initialize and set up the config files**:
+   ```bash
+   # Install dependencies and set up config symlinks
+   npm run setup
+   
+   # Or just set up config files (if dependencies are already installed)
+   npm run setup-api-config
+   ```
+
+   This will:
+   - Create symlinks from `api-config/config/` to the project root for all config files
+   - Create a symlink from `api-config/env-template` to `env-template` in the project root (if it exists)
+   - Prompt you if files already exist (with option to backup and replace)
+   
+   After running the setup, copy `env-template` to `.env` and update it with your user-specific secrets:
+   ```bash
+   cp env-template .env
+   # Then edit .env with your secrets
+   ```
+
+5. **Update the submodule** when changes are made:
+   ```bash
+   # If tracking a branch, this will pull the latest from that branch
+   git submodule update --remote api-config
+   
+   # Or update and initialize all submodules at once
+   git submodule update --remote --init --recursive
+   ```
+   
+   **Note**: If you configured the submodule to track a branch, `--remote` will automatically pull from that branch. Otherwise, it will pull from the commit that the main repository references.
+
+### Running API Specific tests
+If your API submodule contains tests, you can run them after generating:
+  ```bash
+  # If not previously run after generating
+  npm run zapier:install
+
+  # Creates a symlink to submodule test files on first run
+  npm run zapier:test
+  ```
+
+**Important for test files**: Since test files are symlinked from `api-config/test/` to `generated/test/`, use `process.cwd()` instead of `__dirname` when referencing files in the generated directory. This is because `__dirname` points to the original file location in the submodule, not the symlinked location.
+
+**Example test file structure:**
+```javascript
+// Load environment variables from .env file (in generated/ directory)
+require('dotenv').config({ path: require('path').join(process.cwd(), '.env') });
+
+const should = require('should');
+const zapier = require('zapier-platform-core');
+const path = require('path');
+const App = require(path.join(process.cwd(), 'index')); // Use process.cwd(), not __dirname
+
+const appTester = zapier.createAppTester(App);
+// ... rest of test code
+```
+
+When tests run, `process.cwd()` will be the `generated/` directory, so:
+- `path.join(process.cwd(), 'index')` resolves to `generated/index`
+- `path.join(process.cwd(), '.env')` resolves to `generated/.env`
+
+See the [Zapier Docs](https://docs.zapier.com/platform/build-cli/overview#writing-unit-tests) for more details on writing tests.
+
+### Benefits of Using a Submodule
+
+- **Separation of concerns**: Keep API-specific configs separate from the generic generator
+- **Version control**: Track different versions of your API configs independently
+- **Reusability**: The generator can work with any OpenAPI spec by switching submodules
+- **Collaboration**: Multiple teams can maintain their own API config repositories
+- **Easy updates**: Edit configs in the submodule, and changes are immediately available via symlinks
+
 
 ## Troubleshooting
 
@@ -826,6 +996,12 @@ Run validation to see detailed errors:
 ```bash
 npm run zapier:validate
 ```
+
+### Tests fail with authentication errors
+
+If your api uses authentication, make sure your .env file includes any necessary environment variables. 
+
+Since the tests are run from the generated directory, the npm test and install scripts will copy your .env file there, but check to make sure it isn't missing.
 
 ### Array Response Errors
 

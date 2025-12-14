@@ -7,6 +7,12 @@ schema-cache/
 # Environment variables
 .env
 
+# API config submodule (allow the directory, but ignore its contents if not initialized)
+# The submodule itself should be committed, but we ignore symlinked config files
+
+# Generated files are not in the package
+generated/
+
 # Node modules
 node_modules/
 
@@ -25,20 +31,24 @@ Thumbs.db
 *.swo
 *~
 
-# Zapier files (in generated directory)
-generated/.zapierapprc
 
 # Configuration files (use example files as templates)
 # Ignore all *-config*.json files except those ending in -example.json
+# Note: Config files may be symlinked from api-config submodule
 *-config*.json
 !*-config-example.json
+# api-config submodule specific
+env-template
+
+
+# Completed work files
+tests_as_submodule_plan.md
 
 # Work in progress files
 Debugging.md
+FirstZap.md
+big_ticket_items_zap_plan.md
+amazon_email_transaction_matcher.md
+Amazon*.txt
 
-# Root-level .zapierapprc (generator creates it in generated/ directory)
-.zapierapprc
-
-# Inspection/backup directories
-v1-inspection/
 

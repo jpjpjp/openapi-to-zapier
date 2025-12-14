@@ -1,0 +1,4 @@
+[submodule "api-config"]
+	path = api-config
+	url = https://github.com/lunch-money/zapier-config.git
+	branch = main

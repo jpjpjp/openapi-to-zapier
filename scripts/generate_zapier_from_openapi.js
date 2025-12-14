@@ -2751,7 +2751,7 @@ async function generate() {
   console.log(`   1. cd ${config.outputDir}`);
   console.log(`   2. npm install`);
   console.log(`   3. npm test`);
-  console.log(`   4. npx zapier-platform-cli push`);
+    console.log(`   4. npx zapier-platform push`);
   console.log(`\n💡 Tip: Use 'npm run generate:clean' to remove generated directory before generation`);
 }
 

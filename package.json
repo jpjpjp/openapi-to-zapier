@@ -9,16 +9,18 @@
   "scripts": {
     "generate": "node scripts/generate_zapier_from_openapi.js",
     "generate:clean": "node scripts/generate_zapier_from_openapi.js --clean && cd generated && echo 'copying environment' && cp ../.env .env && echo 'installing dependencies...' && npm install",
-    "zapier:login": "cd generated && npx zapier-platform login",
-    "zapier:install": "cd generated && npm install",
-    "zapier:test": "cd generated && npx zapier-platform test -- --exit",
-    "zapier:push": "cd generated && npx zapier-platform push",
-    "zapier:validate": "cd generated && npx zapier-platform validate",
-    "zapier:users:invite": "cd generated && npx zapier-platform users:invite",
-    "zapier:users:list": "cd generated && npx zapier-platform users:list",
-    "zapier:users:links": "cd generated && npx zapier-platform users:links",
-    "zapier:version:delete": "cd generated && npx zapier-platform delete:version",
-    "zapier:versions": "cd generated && npx zapier-platform versions"
+    "setup-api-config": "node scripts/setup-api-config.js",
+    "setup-api-config": "npm install && npm run setup-api-config",
+    "zapier:login": "cd generated && npm exec -- zapier-platform login",
+    "zapier:install": "cd generated && cp -f ../.env .env 2>/dev/null || true && npm install",
+    "zapier:test": "node scripts/ensure-test-symlink.js && cd generated && cp -f ../.env .env 2>/dev/null || true && npm exec -- zapier-platform test -- --exit",
+    "zapier:push": "cd generated && npm exec -- zapier-platform push",
+    "zapier:validate": "cd generated && npm exec -- zapier-platform validate",
+    "zapier:users:invite": "cd generated && npm exec -- zapier-platform users:invite",
+    "zapier:users:list": "cd generated && npm exec -- zapier-platform users:list",
+    "zapier:users:links": "cd generated && npm exec -- zapier-platform users:links",
+    "zapier:version:delete": "cd generated && npm exec -- zapier-platform delete:version",
+    "zapier:versions": "cd generated && npm exec -- zapier-platform versions"
   },
   "dependencies": {
     "dotenv": "^16.0.0",
