@@ -8,7 +8,8 @@ const authentication = {
       url: '{{baseUrl}}{{testEndpoint}}',
       method: 'GET',
       headers: {
-        {{authHeader}}
+        {{authHeader}}{{#if customHeaderCode}}
+        {{customHeaderCode}}{{/if}}
       },
     });
     return response.json;

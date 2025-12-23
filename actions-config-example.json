@@ -1,4 +1,8 @@
 {
+  "customHeader": {
+    "name": "X-Client-Source",
+    "value": "zapier-integration"
+  },
   "actions": {
     "createUsersWithListInput": {
       "simplify": {
