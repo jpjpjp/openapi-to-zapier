@@ -7,6 +7,20 @@
       "arrayProperty": "pets",
       "queryParams": {
         "status": "available"
+      },
+      "hideQueryParams": ["limit", "offset"],
+      "dynamicFields": {
+        "category_id": {
+          "sourceTrigger": "getAllCategories",
+          "valueField": "id"
+        }
+      },
+      "fieldLabels": {
+        "category_id": "Filter by Category"
+      },
+      "fieldHelpText": {
+        "category_id": "Select a category to filter pets. Only pets in this category will be returned.",
+        "tags": "Comma-separated list of tags to filter by. Leave empty to return all pets."
       }
     },
     "pollPetsByTags": {
