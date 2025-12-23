@@ -156,6 +156,20 @@ function replaceTemplateVarsForNested(template) {
 }
 
 /**
+ * Generate custom header code for inclusion in headers object
+ * Returns empty string if no custom header is configured
+ */
+function generateCustomHeaderCode(customHeader) {
+  if (!customHeader || !customHeader.name || !customHeader.value) {
+    return '';
+  }
+  // Escape the header name and value for JavaScript
+  const headerName = escapeForJsString(customHeader.name);
+  const headerValue = escapeForJsString(customHeader.value);
+  return `      '${headerName}': '${headerValue}',\n`;
+}
+
+/**
  * Generate label code for "simple template + complex fallback" case
  * This is used when the main template is simple but the fallback has nested templates
  */
@@ -264,15 +278,18 @@ function loadTriggerConfig() {
 function loadActionConfig() {
   const configPath = ACTION_CONFIG_PATH;
   if (!fs.existsSync(configPath)) {
-    return { actions: {} };
+    return { actions: {}, customHeader: null };
   }
   
   try {
     const configContent = fs.readFileSync(configPath, 'utf8');
-    return parseJsonWithComments(configContent);
+    const config = parseJsonWithComments(configContent);
+    // Extract customHeader if present
+    const customHeader = config.customHeader || null;
+    return { ...config, customHeader };
   } catch (error) {
     console.warn(`⚠️  Warning: Could not parse action config file at ${configPath}: ${error.message}`);
-    return { actions: {} };
+    return { actions: {}, customHeader: null };
   }
 }
 
@@ -454,7 +471,7 @@ function titleCase(str) {
 }
 
 // Generate action file for an endpoint
-function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {}, triggerConfig = {}) {
+function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {}, triggerConfig = {}, customHeader = null) {
   const key = endpoint.operationId || endpoint.path.replace(/\//g, '_').replace(/^_/, '');
   let noun = mapper.getNoun(endpoint.operationId, endpoint.path);
   
@@ -1550,6 +1567,9 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {},
     description = description.substring(0, 997) + '...';
   }
 
+  // Generate custom header code
+  const customHeaderCode = generateCustomHeaderCode(customHeader);
+
   const templateData = {
     key,
     noun,
@@ -1569,6 +1589,7 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {},
     sampleCode,
     cleanInputDataCode,
     dynamicFieldsCode,
+    customHeaderCode,
   };
 
   return generator.generate('action.template.js', templateData);
@@ -1576,7 +1597,7 @@ function generateAction(endpoint, baseUrl, mapper, generator, actionConfig = {},
 
 // Generate trigger file for an endpoint (similar to action but for polling,
 // webhooks or dynamic dropdowns)
-function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
+function generateTrigger(triggerConfig, baseUrl, mapper, generator, customHeader = null) {
   const endpoint = triggerConfig.endpoint;
   const key = triggerConfig.key; // Key is always set when creating trigger objects
   const noun = mapper.getNoun(endpoint.operationId, endpoint.path);
@@ -1594,9 +1615,18 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
   const autoQueryParams = triggerConfig.queryParams || {};
   const autoQueryParamKeys = new Set(Object.keys(autoQueryParams));
   
-  // Filter out auto-set params from input fields (user doesn't need to provide them)
+  // Get hideQueryParams from config (similar to actions)
+  const hideQueryParams = new Set(triggerConfig.hideQueryParams || []);
+  
+  // Get dynamicFields config
+  const dynamicFieldsConfig = triggerConfig.dynamicFields || {};
+  const dynamicFieldKeys = new Set(Object.keys(dynamicFieldsConfig));
+  
+  // Filter out auto-set params and hidden params from input fields
   const allInputFields = mapper.parametersToZapierFields(endpoint.parameters);
-  const inputFields = allInputFields.filter(field => !autoQueryParamKeys.has(field.key));
+  const inputFields = allInputFields.filter(field => 
+    !autoQueryParamKeys.has(field.key) && !hideQueryParams.has(field.key)
+  );
 
   // Get sample from response
   const successResponse = endpoint.responses['200'] || endpoint.responses['201'];
@@ -1614,11 +1644,12 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
 
   // Build query parameters code
   // Auto-set params from config are always included
-  // User-provided params are conditionally included
+  // User-provided params are conditionally included (but not hidden ones)
   let queryParamsCode = '';
   let paramsCode = '';
   const hasAutoParams = Object.keys(autoQueryParams).length > 0;
-  const hasUserParams = queryParams.some(p => !autoQueryParamKeys.has(p.name));
+  const visibleQueryParams = queryParams.filter(p => !autoQueryParamKeys.has(p.name) && !hideQueryParams.has(p.name));
+  const hasUserParams = visibleQueryParams.length > 0;
   
   if (hasAutoParams || hasUserParams) {
     queryParamsCode = '  const params = {};\n';
@@ -1632,25 +1663,23 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
       });
     }
     
-    // Add user-provided params (conditionally)
-    queryParams.forEach(param => {
-      if (!autoQueryParamKeys.has(param.name)) {
-        // Check if this is a date query parameter that needs format conversion
-        const paramSchema = param.schema || {};
-        const isDateParam = paramSchema.type === 'string' && paramSchema.format === 'date';
-        
-        if (isDateParam) {
-          // For date query params, extract just the date part (YYYY-MM-DD) if a datetime was provided
-          queryParamsCode += `  if (bundle.inputData.${param.name}) {\n`;
-          queryParamsCode += `    // Extract date part (YYYY-MM-DD) from input, handling both date strings and datetime strings\n`;
-          queryParamsCode += `    const ${param.name}Value = String(bundle.inputData.${param.name});\n`;
-          queryParamsCode += `    params.${param.name} = ${param.name}Value.includes('T') ? ${param.name}Value.split('T')[0] : ${param.name}Value.split(' ')[0];\n`;
-          queryParamsCode += `  }\n`;
-        } else {
-          queryParamsCode += `  if (bundle.inputData.${param.name}) {\n`;
-          queryParamsCode += `    params.${param.name} = bundle.inputData.${param.name};\n`;
-          queryParamsCode += `  }\n`;
-        }
+    // Add user-provided params (conditionally, excluding hidden ones)
+    visibleQueryParams.forEach(param => {
+      // Check if this is a date query parameter that needs format conversion
+      const paramSchema = param.schema || {};
+      const isDateParam = paramSchema.type === 'string' && paramSchema.format === 'date';
+      
+      if (isDateParam) {
+        // For date query params, extract just the date part (YYYY-MM-DD) if a datetime was provided
+        queryParamsCode += `  if (bundle.inputData.${param.name}) {\n`;
+        queryParamsCode += `    // Extract date part (YYYY-MM-DD) from input, handling both date strings and datetime strings\n`;
+        queryParamsCode += `    const ${param.name}Value = String(bundle.inputData.${param.name});\n`;
+        queryParamsCode += `    params.${param.name} = ${param.name}Value.includes('T') ? ${param.name}Value.split('T')[0] : ${param.name}Value.split(' ')[0];\n`;
+        queryParamsCode += `  }\n`;
+      } else {
+        queryParamsCode += `  if (bundle.inputData.${param.name}) {\n`;
+        queryParamsCode += `    params.${param.name} = bundle.inputData.${param.name};\n`;
+        queryParamsCode += `  }\n`;
       }
     });
     
@@ -1947,6 +1976,42 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
   }
 
   // Build input fields code
+  // Apply dynamic fields configuration to input fields
+  // Check if any fields should be dynamic dropdowns
+  if (Object.keys(dynamicFieldsConfig).length > 0) {
+    inputFields.forEach(field => {
+      if (dynamicFieldKeys.has(field.key)) {
+        const fieldConfig = dynamicFieldsConfig[field.key];
+        const sourceTrigger = fieldConfig.sourceTrigger;
+        const valueField = fieldConfig.valueField || 'id';
+        
+        if (sourceTrigger) {
+          // Mark field as dynamic
+          field.dynamic = true;
+          field.dynamicKey = `${sourceTrigger}.${valueField}`;
+        }
+      }
+    });
+  }
+  
+  // Update field labels if specified in config
+  if (triggerConfig.fieldLabels) {
+    inputFields.forEach(field => {
+      if (triggerConfig.fieldLabels[field.key]) {
+        field.label = triggerConfig.fieldLabels[field.key];
+      }
+    });
+  }
+  
+  // Update field help text if specified in config
+  if (triggerConfig.fieldHelpText) {
+    inputFields.forEach(field => {
+      if (triggerConfig.fieldHelpText[field.key]) {
+        field.helpText = triggerConfig.fieldHelpText[field.key];
+      }
+    });
+  }
+  
   const inputFieldsCode = inputFields.length > 0
     ? '\n' + inputFields.map(field => {
         const parts = [`      key: '${field.key}'`, `label: '${field.label}'`, `type: '${field.type}'`];
@@ -1961,6 +2026,10 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
           // Zapier supports both string arrays and {label, value} objects
           // Use the format that was generated by schema_mapper
           parts.push(`choices: ${JSON.stringify(field.choices)}`);
+        }
+        // Add dynamic property if configured
+        if (field.dynamic && field.dynamicKey) {
+          parts.push(`dynamic: '${field.dynamicKey}'`);
         }
         // Only include default for string fields (Zapier validation is strict about defaults)
         if (field.default !== undefined && field.type === 'string') {
@@ -2107,6 +2176,10 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
       arrayPropForPagination = 'response.json || []';
     }
     
+    // Generate custom header code
+    const customHeaderCode = generateCustomHeaderCode(customHeader);
+    const customHeaderStr = customHeaderCode ? customHeaderCode.trim() : '';
+    
     requestCode = `  // For polling triggers, Zapier doesn't automatically paginate
   // We need to manually fetch all pages by looping until has_more is false
   // This ensures we get all items, not just the first page
@@ -2125,7 +2198,7 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
       params: pageParams,
       headers: {
         Authorization: \`Bearer \${bundle.authData.access_token}\`,
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json',${customHeaderStr ? '\n        ' + customHeaderStr : ''}
       },
     });
     
@@ -2147,13 +2220,17 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
   let results = allResults;`;
   } else {
     // Single request (no pagination)
+    // Generate custom header code
+    const customHeaderCode = generateCustomHeaderCode(customHeader);
+    const customHeaderStr = customHeaderCode ? customHeaderCode.trim() : '';
+    
     requestCode = `  const response = await z.request({
     method: '${endpoint.method.toUpperCase()}',
     url: url,
     ${paramsCode}
     headers: {
       Authorization: \`Bearer \${bundle.authData.access_token}\`,
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json',${customHeaderStr ? '\n      ' + customHeaderStr : ''}
     },
   });
 
@@ -2186,7 +2263,7 @@ function generateTrigger(triggerConfig, baseUrl, mapper, generator) {
 }
 
 // Generate authentication file
-function generateAuthentication(baseUrl, generator, authConfig) {
+function generateAuthentication(baseUrl, generator, authConfig, customHeader = null) {
   // Build helpLink code (only if helpLink is provided)
   const helpLinkCode = authConfig.helpLink 
     ? `      helpLink: "${authConfig.helpLink}",`
@@ -2208,6 +2285,9 @@ function generateAuthentication(baseUrl, generator, authConfig) {
   // Build Authorization header string (fieldKey needs to be inserted into template literal)
   const authHeader = `Authorization: \`Bearer \${bundle.authData.${authConfig.fieldKey}}\`,`;
   
+  // Generate custom header code
+  const customHeaderCode = generateCustomHeaderCode(customHeader);
+  
   const templateData = {
     baseUrl,
     testEndpoint: authConfig.testEndpoint,
@@ -2219,12 +2299,13 @@ function generateAuthentication(baseUrl, generator, authConfig) {
     helpLinkCode,
     connectionLabel: connectionLabelCode,
     authHeader,
+    customHeaderCode,
   };
   return generator.generate('authentication.template.js', templateData);
 }
 
 // Generate index.js
-function generateIndex(version, actions, triggers, generator, authConfig) {
+function generateIndex(version, actions, triggers, generator, authConfig, customHeader = null) {
   // Build requires - handle case where same key exists as both action and trigger
   const actionKeys = new Set(actions.map(a => a.key));
   const triggerKeys = new Set(triggers.map(t => t.key));
@@ -2264,6 +2345,13 @@ function generateIndex(version, actions, triggers, generator, authConfig) {
   
   // Build beforeRequest hook code with dynamic fieldKey
   const fieldKey = authConfig.fieldKey || 'access_token';
+  // Generate custom header code for beforeRequest hook
+  let customHeaderCode = '';
+  if (customHeader && customHeader.name && customHeader.value) {
+    const headerName = escapeForJsString(customHeader.name);
+    const headerValue = escapeForJsString(customHeader.value);
+    customHeaderCode = `\n      // Add custom header\n      request.headers['${headerName}'] = '${headerValue}';`;
+  }
   const beforeRequestCode = `    (request, z, bundle) => {
       // Remove ${fieldKey} from query params if Zapier added it automatically
       if (request.params && request.params.${fieldKey}) {
@@ -2279,7 +2367,7 @@ function generateIndex(version, actions, triggers, generator, authConfig) {
       // Add authentication header if not already present
       if (!request.headers.Authorization) {
         request.headers.Authorization = \`Bearer \${bundle.authData.${fieldKey}}\`;
-      }
+      }${customHeaderCode}
       return request;
     }`;
   
@@ -2514,7 +2602,11 @@ async function generate() {
 
   // Load action configuration
   const actionConfig = loadActionConfig();
+  const customHeader = actionConfig.customHeader || null;
   console.log(`📋 Loaded action config: ${Object.keys(actionConfig.actions || {}).length} action(s) configured`);
+  if (customHeader) {
+    console.log(`📋 Custom header configured: ${customHeader.name} = ${customHeader.value}`);
+  }
 
   // Load authentication configuration
   const authConfig = loadAuthConfig();
@@ -2578,6 +2670,10 @@ async function generate() {
             hidden: triggerConfigForPath.hidden || false,
             filters: triggerConfigForPath.filters || {},
             label: triggerConfigForPath.label || null,
+            hideQueryParams: triggerConfigForPath.hideQueryParams || [],
+            dynamicFields: triggerConfigForPath.dynamicFields || {},
+            fieldLabels: triggerConfigForPath.fieldLabels || {},
+            fieldHelpText: triggerConfigForPath.fieldHelpText || {},
           });
           addedTriggerKeys.add(triggerKey);
         }
@@ -2607,6 +2703,10 @@ async function generate() {
             hidden: true,
             filters: triggerConfigForPath.filters || {},
             label: triggerConfigForPath.label || null,
+            hideQueryParams: triggerConfigForPath.hideQueryParams || [],
+            dynamicFields: triggerConfigForPath.dynamicFields || {},
+            fieldLabels: triggerConfigForPath.fieldLabels || {},
+            fieldHelpText: triggerConfigForPath.fieldHelpText || {},
           });
           addedTriggerKeys.add(triggerKey);
         }
@@ -2631,7 +2731,8 @@ async function generate() {
       mapper,
       generator,
       action.actionConfig || {},
-      triggerConfig
+      triggerConfig,
+      customHeader
     );
     const filePath = path.join(actionsDir, `${action.key}.js`);
     const formatted = await formatCode(code, filePath);
@@ -2641,7 +2742,7 @@ async function generate() {
 
   // Generate trigger files
   for (const trigger of triggers) {
-    const code = generateTrigger(trigger, baseUrl, mapper, generator);
+    const code = generateTrigger(trigger, baseUrl, mapper, generator, customHeader);
     const triggerPath = path.join(triggersDir, `${trigger.key}.js`);
     const formattedTrigger = await formatCode(code, triggerPath);
     generator.writeFile(triggerPath, formattedTrigger);
@@ -2650,14 +2751,14 @@ async function generate() {
   }
 
   // Generate authentication.js
-  const authCode = generateAuthentication(baseUrl, generator, authConfig);
+  const authCode = generateAuthentication(baseUrl, generator, authConfig, customHeader);
   const authPath = path.join(config.outputDir, 'authentication.js');
   const formattedAuth = await formatCode(authCode, authPath);
   generator.writeFile(authPath, formattedAuth);
   console.log(`  ✅ Generated: authentication.js`);
 
   // Generate index.js
-  const indexCode = generateIndex(version, actions, triggers, generator, authConfig);
+  const indexCode = generateIndex(version, actions, triggers, generator, authConfig, customHeader);
   const indexPath = path.join(config.outputDir, 'index.js');
   const formattedIndex = await formatCode(indexCode, indexPath);
   generator.writeFile(indexPath, formattedIndex);

@@ -21,7 +21,8 @@
     {{bodyCode}}
     headers: {
       Authorization: `Bearer ${bundle.authData.access_token}`,
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json',{{#if customHeaderCode}}
+{{customHeaderCode}}{{/if}}
     },
   });
 
