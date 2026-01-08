@@ -172,6 +172,14 @@ You can also configure hidden triggers that don't appear in the Zapier UI but ar
 
 - **`label`**: Optional object for hidden triggers. Configures how items are displayed in dynamic dropdowns. See [Label Templates](#label-templates) section below.
 
+- **`hideQueryParams`**: Optional array of strings. Names of query parameters to hide from the input fields. These parameters won't appear in the Zapier UI, but can still be set programmatically if needed. Useful for removing advanced or rarely-used parameters to simplify the trigger interface.
+
+- **`dynamicFields`**: Optional object for configuring dynamic dropdowns for query parameters. Maps field names to their dynamic dropdown configuration. See [Dynamic Dropdowns](#dynamic-dropdowns) section below. This allows users to select values from a dropdown instead of typing IDs manually.
+
+- **`fieldLabels`**: Optional object for customizing field labels. Maps field keys (query parameter names) to their display labels. Example: `{"category_id": "Filter by Category"}` will display "Filter by Category" instead of "Category Id" in the Zapier UI.
+
+- **`fieldHelpText`**: Optional object for customizing help text for query parameters. Maps field keys (query parameter names) to their help text. This overrides the help text from the OpenAPI schema. Example: `{"category_id": "Select a category to filter results. Only items in this category will be returned."}`
+
 #### Query Parameters vs Filtering
 
 **Query Parameters (`queryParams`)**: Use for server-side filtering. These are sent to the API and reduce the amount of data returned, making the trigger more efficient. Parameters specified here are automatically included in every API request and won't appear as user input fields.
@@ -235,6 +243,19 @@ You can also configure hidden triggers that don't appear in the Zapier UI but ar
       "arrayProperty": "pets",
       "queryParams": {
         "status": "available"
+      },
+      "hideQueryParams": ["limit", "offset"],
+      "dynamicFields": {
+        "category_id": {
+          "sourceTrigger": "getAllCategories",
+          "valueField": "id"
+        }
+      },
+      "fieldLabels": {
+        "category_id": "Filter by Category"
+      },
+      "fieldHelpText": {
+        "category_id": "Select a category to filter pets. Only pets in this category will be returned."
       },
       "filterCode": "// Optional: Add custom filtering logic here if needed"
     },
@@ -369,6 +390,7 @@ Not yet supported.
 
 To customize how actions are generated, create an `actions-config.json` file in the project root. See `actions-config-example.json` for a template. This allows you to:
 
+- Add custom headers to all API requests
 - Omit endpoints from generation
 - Hide specific query parameters or request body properties
 - Set default values for fields
@@ -377,10 +399,34 @@ To customize how actions are generated, create an `actions-config.json` file in 
 - Configure dynamic dropdowns for ID fields
 - Extract single items from array responses
 
+#### Custom Header Configuration
+
+You can add a custom header to all API requests (actions, triggers, and authentication) by adding a `customHeader` configuration at the top level of `actions-config.json`:
+
+```json
+{
+  "customHeader": {
+    "name": "X-Client-Source",
+    "value": "zapier-integration"
+  },
+  "actions": {
+    ...
+  }
+}
+```
+
+This configuration:
+- Adds the specified header to all API requests made by actions, triggers, and authentication test requests
+- Adds the header via the `beforeRequest` hook for all requests
+
 **Example Configuration (using Petstore API):**
 
 ```json
 {
+  "customHeader": {
+    "name": "X-Client-Source",
+    "value": "zapier-integration"
+  },
   "actions": {
     "addPet": {
       "fieldDefaults": {
@@ -480,10 +526,15 @@ This configuration:
 
 #### Dynamic Dropdowns
 
-Dynamic dropdowns allow users to select values from a list fetched from your API, rather than typing IDs manually. This requires:
+Dynamic dropdowns allow users to select values from a list fetched from your API, rather than typing IDs manually. This works for both **actions** and **triggers**.
 
+**For Actions:**
 1. **Hidden Trigger**: A hidden trigger in `triggers-config.json` that fetches the list of options
 2. **Action Configuration**: Reference to that trigger in `actions-config.json` via `dynamicFields`
+
+**For Triggers:**
+1. **Hidden Trigger**: A hidden trigger in `triggers-config.json` that fetches the list of options
+2. **Trigger Configuration**: Reference to that trigger in `triggers-config.json` via `dynamicFields` (in the same trigger config)
 
 **Step 1: Create Hidden Trigger**
 
@@ -575,6 +626,62 @@ Dynamic dropdowns work with:
 ```
 
 **Note**: For multi-select fields (arrays), use comma-separated input. The generator automatically converts comma-separated strings to arrays of numbers.
+
+**Dynamic Dropdowns in Triggers:**
+
+Triggers can also use dynamic dropdowns for their query parameters. Configure this directly in the trigger's configuration:
+
+```json
+{
+  "triggers": {
+    "pollItems": {
+      "endpoint": "/items",
+      "name": "Poll for Items",
+      "title": "Triggers when new items are found",
+      "dynamicFields": {
+        "category_id": {
+          "sourceTrigger": "getAllCategories",
+          "valueField": "id"
+        },
+        "owner_id": {
+          "sourceTrigger": "getAllUsers",
+          "valueField": "id"
+        }
+      },
+      "fieldLabels": {
+        "category_id": "Filter by Category",
+        "owner_id": "Filter by Owner"
+      },
+      "fieldHelpText": {
+        "category_id": "Select a category to filter items. Only items in this category will be returned.",
+        "owner_id": "Select a user to filter items. Only items owned by this user will be returned."
+      }
+    },
+    "getAllCategories": {
+      "endpoint": "/categories",
+      "hidden": true,
+      "label": {
+        "template": "${name} (ID: ${id})",
+        "fallback": "${name}"
+      }
+    },
+    "getAllUsers": {
+      "endpoint": "/users",
+      "hidden": true,
+      "label": {
+        "template": "${name} (${email})",
+        "fallback": "${name}"
+      }
+    }
+  }
+}
+```
+
+This configuration:
+- Makes `category_id` and `owner_id` dynamic dropdown fields in the trigger
+- Fetches options from the `getAllCategories` and `getAllUsers` hidden triggers
+- Uses custom labels and help text for better user experience
+- Allows users to select categories and owners from dropdowns instead of typing IDs
 
 #### Helper Fields
 

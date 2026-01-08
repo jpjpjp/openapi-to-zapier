@@ -10,7 +10,7 @@
     "generate": "node scripts/generate_zapier_from_openapi.js",
     "generate:clean": "node scripts/generate_zapier_from_openapi.js --clean && cd generated && echo 'copying environment' && cp ../.env .env && echo 'installing dependencies...' && npm install",
     "setup-api-config": "node scripts/setup-api-config.js",
-    "setup-api-config": "npm install && npm run setup-api-config",
+    "setup": "npm install && npm run setup-api-config",
     "zapier:login": "cd generated && npm exec -- zapier-platform login",
     "zapier:install": "cd generated && cp -f ../.env .env 2>/dev/null || true && npm install",
     "zapier:test": "node scripts/ensure-test-symlink.js && cd generated && cp -f ../.env .env 2>/dev/null || true && npm exec -- zapier-platform test -- --exit",
